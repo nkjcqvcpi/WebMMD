@@ -67,6 +67,7 @@ export async function initWebGpu(
     device,
     format,
     alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
   });
 
   return { adapter, device, format };

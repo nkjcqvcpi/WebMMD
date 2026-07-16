@@ -3,6 +3,7 @@
 import { WebGpuRenderer, ModelData, ModelRenderRange } from "@webmmd/webgpu";
 import { OrbitCamera } from "./camera.js";
 import type { WasmModelMetadata } from "@webmmd/protocol";
+import { resolveRelativePath } from "./path.js";
 
 export interface IWasmModelRuntime {
   evaluate(): void;
@@ -40,6 +41,17 @@ export class WebMmdViewer {
   private morphWeights: Map<number, number> = new Map(); // morphIndex -> weight (0..1)
   private modelRuntime: IWasmModelRuntime | null = null;
 
+  // Recovery raw buffers
+  private activeVertices: ArrayBuffer | null = null;
+  private activeIndices: ArrayBuffer | null = null;
+  private activeMaterials: ArrayBuffer | null = null;
+  private activeVertexMorphOffsets: ArrayBuffer | null = null;
+  private activeUvMorphOffsets: ArrayBuffer | null = null;
+  private activeAdditionalUvs: ArrayBuffer | null = null;
+
+  private isRecovering = false;
+  private userDeviceLostCallback?: (reason: string) => void;
+
   // VFS for texture loading
   private vfs: Map<string, File> = new Map();
 
@@ -53,12 +65,14 @@ export class WebMmdViewer {
     });
 
     this.setupResizeObserver();
+    document.addEventListener("visibilitychange", this.handleVisibilityChange);
   }
 
   public async initialize(
     onDeviceLost?: (reason: string) => void,
   ): Promise<void> {
-    await this.renderer.initialize(onDeviceLost);
+    this.userDeviceLostCallback = onDeviceLost;
+    await this.renderer.initialize((reason) => this.handleDeviceLost(reason));
     this.startLoop();
   }
 
@@ -97,6 +111,7 @@ export class WebMmdViewer {
 
   public setVfs(files: Map<string, File>) {
     this.vfs = new Map();
+    this.textureCache.clear();
     for (const [key, file] of files.entries()) {
       const normalizedKey = key.replace(/\\/g, "/").toLowerCase();
       this.vfs.set(normalizedKey, file);
@@ -118,6 +133,12 @@ export class WebMmdViewer {
     }
     this.modelRuntime = runtime;
     this.activeMetadata = metadata;
+    this.activeVertices = vertices;
+    this.activeIndices = indices;
+    this.activeMaterials = materials;
+    this.activeVertexMorphOffsets = vertexMorphOffsets;
+    this.activeUvMorphOffsets = uvMorphOffsets;
+    this.activeAdditionalUvs = _additionalUvs;
     this.morphWeights.clear();
     this.camera.frameModel(metadata.bounds);
 
@@ -134,7 +155,36 @@ export class WebMmdViewer {
     console.log("[Viewer] Resolving textures...");
     const bitmaps = await this.resolveTextures(metadata.textures);
 
-    // 2. Prepare material ranges for renderer
+    // 2. Prepare material ranges & modelData using helper
+    const modelData = this.buildModelData(
+      metadata,
+      vertices,
+      indices,
+      materials,
+      vertexMorphOffsets,
+      uvMorphOffsets,
+      bitmaps,
+    );
+
+    await this.renderer.setModel(modelData);
+
+    // Initial evaluation
+    this.modelRuntime.evaluate();
+    const skinMatrices = this.modelRuntime.get_skin_matrices_view();
+    this.renderer.updateBones(skinMatrices);
+
+    this.markDirty();
+  }
+
+  private buildModelData(
+    metadata: WasmModelMetadata,
+    vertices: ArrayBuffer,
+    indices: ArrayBuffer,
+    materials: ArrayBuffer,
+    vertexMorphOffsets: ArrayBuffer,
+    uvMorphOffsets: ArrayBuffer,
+    bitmaps: (ImageBitmap | null)[],
+  ): ModelData {
     let offset = 0;
     const ranges: ModelRenderRange[] = metadata.materials.map((m, matIdx) => {
       const firstIndex = offset;
@@ -194,7 +244,7 @@ export class WebMmdViewer {
       range.toonMode = toonMode;
     }
 
-    const modelData: ModelData = {
+    return {
       vertices,
       indices,
       materials,
@@ -208,15 +258,13 @@ export class WebMmdViewer {
       uvMorphMeta: metadata.uvMorphMeta,
       numMorphs: metadata.morphs.length,
     };
+  }
 
-    await this.renderer.setModel(modelData);
+  private activePmxPath = "";
+  private textureCache = new Map<string, ImageBitmap>();
 
-    // Initial evaluation
-    this.modelRuntime.evaluate();
-    const skinMatrices = this.modelRuntime.get_skin_matrices_view();
-    this.renderer.updateBones(skinMatrices);
-
-    this.markDirty();
+  public setActivePmxPath(path: string) {
+    this.activePmxPath = path.replace(/\\/g, "/").toLowerCase();
   }
 
   private async resolveTextures(
@@ -225,18 +273,35 @@ export class WebMmdViewer {
     const bitmaps: (ImageBitmap | null)[] = [];
 
     for (const rawPath of texturePaths) {
-      const file = this.lookupVfs(rawPath);
+      // Get strict resolved path relative to the active PMX file directory
+      const resolvedPath = this.activePmxPath
+        ? resolveRelativePath(this.activePmxPath, rawPath)
+        : rawPath.replace(/\\/g, "/").toLowerCase();
+
+      // Check cache first
+      if (this.textureCache.has(resolvedPath)) {
+        bitmaps.push(this.textureCache.get(resolvedPath)!);
+        continue;
+      }
+
+      const file = this.lookupVfs(resolvedPath);
       if (file) {
         try {
           // createImageBitmap is supported in all modern browsers (including Safari 26)
           const bitmap = await createImageBitmap(file);
+          this.textureCache.set(resolvedPath, bitmap);
           bitmaps.push(bitmap);
         } catch (err) {
-          console.error(`[Viewer] Failed to decode texture: ${rawPath}`, err);
+          console.error(
+            `[Viewer] Failed to decode texture: ${resolvedPath} (raw: ${rawPath})`,
+            err,
+          );
           bitmaps.push(null);
         }
       } else {
-        console.warn(`[Viewer] Texture file not found in VFS: ${rawPath}`);
+        console.warn(
+          `[Viewer] Texture file not found in VFS: ${resolvedPath} (raw: ${rawPath})`,
+        );
         bitmaps.push(null);
       }
     }
@@ -244,15 +309,13 @@ export class WebMmdViewer {
     return bitmaps;
   }
 
-  private lookupVfs(path: string): File | undefined {
-    const normalized = path.replace(/\\/g, "/").toLowerCase();
-
+  private lookupVfs(resolvedPath: string): File | undefined {
     // 1. Direct path lookup
-    let file = this.vfs.get(normalized);
+    let file = this.vfs.get(resolvedPath);
     if (file) return file;
 
     // 2. Basename matching (case-insensitive fallback)
-    const basename = normalized.substring(normalized.lastIndexOf("/") + 1);
+    const basename = resolvedPath.substring(resolvedPath.lastIndexOf("/") + 1);
     for (const [key, f] of this.vfs.entries()) {
       const kBasename = key.substring(key.lastIndexOf("/") + 1);
       if (kBasename === basename) {
@@ -378,11 +441,108 @@ export class WebMmdViewer {
       }
     }
     this.resizeObserver?.disconnect();
+    document.removeEventListener(
+      "visibilitychange",
+      this.handleVisibilityChange,
+    );
     if (this.modelRuntime) {
       this.modelRuntime.free();
       this.modelRuntime = null;
     }
     this.renderer.dispose();
+    this.textureCache.clear();
+  }
+
+  public async readPixel(
+    x: number,
+    y: number,
+  ): Promise<[number, number, number, number]> {
+    this.markDirty();
+    return this.renderer.readPixel(x, y);
+  }
+
+  private handleVisibilityChange = () => {
+    if ((window as any).__webmmdTest) {
+      // Avoid suspending frame rendering in Selenium tests when the tab is unfocused/hidden.
+      return;
+    }
+    if (document.visibilityState === "hidden") {
+      console.log("[Viewer] Visibility hidden. Suspending frame loop...");
+      this.isRunning = false;
+      if (this.animationFrameId !== null) {
+        cancelAnimationFrame(this.animationFrameId);
+        this.animationFrameId = null;
+      }
+      this.frameRequested = false;
+    } else if (document.visibilityState === "visible") {
+      console.log("[Viewer] Visibility visible. Resuming frame loop...");
+      this.isRunning = true;
+      this.markDirty();
+    }
+  };
+
+  private async handleDeviceLost(reason: string) {
+    if (this.isRecovering) return;
+    this.isRecovering = true;
+    console.warn(
+      `[Viewer] WebGPU Device Lost: ${reason}. Attempting transparent recovery...`,
+    );
+
+    let recovered = false;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      try {
+        console.log(`[Viewer] Device recovery attempt ${attempt}/5...`);
+        await this.renderer.initialize((r) => this.handleDeviceLost(r));
+
+        if (
+          this.activeMetadata &&
+          this.activeVertices &&
+          this.activeIndices &&
+          this.activeMaterials &&
+          this.activeVertexMorphOffsets &&
+          this.activeUvMorphOffsets &&
+          this.activeAdditionalUvs &&
+          this.modelRuntime
+        ) {
+          this.textureCache.clear();
+          const bitmaps = await this.resolveTextures(
+            this.activeMetadata.textures,
+          );
+
+          const modelData = this.buildModelData(
+            this.activeMetadata,
+            this.activeVertices,
+            this.activeIndices,
+            this.activeMaterials,
+            this.activeVertexMorphOffsets,
+            this.activeUvMorphOffsets,
+            bitmaps,
+          );
+
+          await this.renderer.setModel(modelData);
+
+          this.markDirty();
+        }
+
+        console.log("[Viewer] WebGPU Device recovery succeeded!");
+        recovered = true;
+        break;
+      } catch (err: any) {
+        console.error(`[Viewer] Recovery attempt ${attempt} failed:`, err);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
+    this.isRecovering = false;
+
+    if (!recovered) {
+      console.error("[Viewer] WebGPU Device recovery failed after 5 attempts.");
+      if (this.userDeviceLostCallback) {
+        this.userDeviceLostCallback(
+          "WebGPU Device recovery failed after multiple attempts.",
+        );
+      }
+    }
   }
 
   public getRuntime(): IWasmModelRuntime | null {

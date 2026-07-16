@@ -90,6 +90,14 @@ export class WebGpuRenderer {
   private modelData: ModelData | null = null;
   private depthTexture: GPUTexture | null = null;
 
+  // Pixel readback helper
+  private readBuffer: GPUBuffer | null = null;
+  private pendingPixelQuery: {
+    x: number;
+    y: number;
+    resolve: (pixel: [number, number, number, number]) => void;
+  } | null = null;
+
   public outlineEnabled = true;
 
   constructor(canvas: HTMLCanvasElement) {
@@ -99,6 +107,11 @@ export class WebGpuRenderer {
   async initialize(onDeviceLost?: (reason: string) => void): Promise<void> {
     this.context = await initWebGpu(this.canvas, onDeviceLost);
     const { device, format } = this.context;
+
+    this.readBuffer = device.createBuffer({
+      size: 256,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
 
     this.renderPipelines = createRenderPipelines(device, format);
     this.computePipelines = createComputePipelines(device);
@@ -583,7 +596,50 @@ export class WebGpuRenderer {
     }
 
     renderPass.end();
+
+    if (this.pendingPixelQuery && this.readBuffer) {
+      const { x, y } = this.pendingPixelQuery;
+      const tx = Math.max(0, Math.min(currentTexture.width - 1, Math.floor(x)));
+      const ty = Math.max(
+        0,
+        Math.min(currentTexture.height - 1, Math.floor(y)),
+      );
+      commandEncoder.copyTextureToBuffer(
+        { texture: currentTexture, origin: { x: tx, y: ty, z: 0 } },
+        { buffer: this.readBuffer, bytesPerRow: 256 },
+        { width: 1, height: 1 },
+      );
+    }
+
     device.queue.submit([commandEncoder.finish()]);
+
+    if (this.pendingPixelQuery && this.readBuffer) {
+      const query = this.pendingPixelQuery;
+      this.pendingPixelQuery = null;
+      const readBuf = this.readBuffer;
+      const qx = query.x;
+      const qy = query.y;
+      readBuf
+        .mapAsync(GPUMapMode.READ)
+        .then(() => {
+          const array = new Uint8Array(readBuf.getMappedRange());
+          const pixel = [array[0]!, array[1]!, array[2]!, array[3]!] as [
+            number,
+            number,
+            number,
+            number,
+          ];
+          console.log(
+            `[WebGPU] readPixel probed at (${qx}, ${qy}) -> [${pixel.join(", ")}]`,
+          );
+          readBuf.unmap();
+          query.resolve(pixel);
+        })
+        .catch((err) => {
+          console.error("Failed to map readBuffer:", err);
+          query.resolve([0, 0, 0, 0]);
+        });
+    }
   }
 
   disposeModel() {
@@ -623,10 +679,21 @@ export class WebGpuRenderer {
     this.defaultTexture?.destroy();
     this.cameraUniformBuffer?.destroy();
     this.depthTexture?.destroy();
+    this.readBuffer?.destroy();
+    this.readBuffer = null;
     for (const tex of this.sharedToons) {
       tex.destroy();
     }
     this.sharedToons = [];
     this.context = null;
+  }
+
+  async readPixel(
+    x: number,
+    y: number,
+  ): Promise<[number, number, number, number]> {
+    return new Promise((resolve) => {
+      this.pendingPixelQuery = { x, y, resolve };
+    });
   }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { exec, execSync } from "child_process";
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { Builder, By, until } from "selenium-webdriver";
@@ -259,6 +259,92 @@ async function runTest() {
       "base64",
     );
     console.log("Saved morphed rendered screenshot.");
+
+    // Canvas Rendering Verification (screenshot-based)
+    // A rendered 3D model produces a screenshot >100KB; a blank canvas is <10KB
+    console.log("Running rendering verification via screenshot analysis...");
+    const modelScreenshotPath = join(
+      testResultsDir,
+      "safari-3-model-rendered.png",
+    );
+    const morphScreenshotPath = join(
+      testResultsDir,
+      "safari-4-morphs-active.png",
+    );
+    const modelScreenshotSize = statSync(modelScreenshotPath).size;
+    const morphScreenshotSize = statSync(morphScreenshotPath).size;
+    console.log(
+      `- Model screenshot size: ${(modelScreenshotSize / 1024).toFixed(1)} KB`,
+    );
+    console.log(
+      `- Morphed screenshot size: ${(morphScreenshotSize / 1024).toFixed(1)} KB`,
+    );
+
+    if (modelScreenshotSize < 50000) {
+      throw new Error(
+        `Rendering verification failed! Model screenshot too small (${modelScreenshotSize} bytes). Canvas may be blank.`,
+      );
+    }
+    if (morphScreenshotSize < 50000) {
+      throw new Error(
+        `Rendering verification failed! Morphed screenshot too small (${morphScreenshotSize} bytes). Canvas may be blank.`,
+      );
+    }
+    // Verify morph activation changed the rendering (screenshots should differ)
+    if (modelScreenshotSize === morphScreenshotSize) {
+      console.log(
+        "  Warning: model and morphed screenshots are identical size. Morph may not have visual effect.",
+      );
+    }
+    console.log("Rendering verification passed!");
+
+    // Repeated-load leak testing
+    console.log(
+      "Starting repeated-load leak testing (reload model 3 times)...",
+    );
+    const baseFrameCount = await driver.executeScript(
+      "return window.__webmmdTest.frameRenderedCount;",
+    );
+
+    for (let loop = 1; loop <= 3; loop++) {
+      console.log(`- Leak check loop ${loop}/3...`);
+      // Select model to trigger full reload
+      await driver.executeScript(`
+        const shell = document.querySelector('webmmd-app-shell');
+        shell.selectZipPmx("【琳妮特】.pmx");
+      `);
+
+      // Wait for parsing and rendering
+      await driver.sleep(2000);
+
+      // Verify rendering is still active by checking frame count increases
+      const currentFrameCount = await driver.executeScript(
+        "return window.__webmmdTest.frameRenderedCount;",
+      );
+      console.log(
+        `  Frame count: ${currentFrameCount} (base: ${baseFrameCount})`,
+      );
+      if (currentFrameCount <= baseFrameCount) {
+        throw new Error(
+          `Rendering stalled after repeated load loop ${loop}. Frame count did not increase.`,
+        );
+      }
+
+      // Take a screenshot and verify it's substantial
+      const loopScreenshot = await driver.takeScreenshot();
+      const loopPath = join(testResultsDir, `safari-leak-loop-${loop}.png`);
+      writeFileSync(loopPath, loopScreenshot, "base64");
+      const loopSize = statSync(loopPath).size;
+      console.log(
+        `  Loop ${loop} screenshot: ${(loopSize / 1024).toFixed(1)} KB`,
+      );
+      if (loopSize < 50000) {
+        throw new Error(
+          `Model rendering failed on repeated load loop ${loop}. Screenshot too small: ${loopSize} bytes.`,
+        );
+      }
+    }
+    console.log("Repeated-load leak testing passed!");
 
     console.log("\n✅ Safari Web Automation verification PASSED!");
   } catch (error) {

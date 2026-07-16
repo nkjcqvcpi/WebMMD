@@ -424,3 +424,289 @@ fn test_ik_solvers() {
     let dist = final_effector_pos.sub(Vec3::new(1.0, 1.0, 0.0)).length();
     assert!(dist < 0.1);
 }
+
+#[test]
+fn test_validation_errors() {
+    use webmmd_core::pmx::types::*;
+    use webmmd_core::validation::validate_pmx;
+
+    let mut model = create_dummy_model();
+
+    // 1. Textures: Path traversal check
+    model.textures = vec![
+        "safe.png".to_string(),
+        "../unsafe.png".to_string(),
+        "/absolute.png".to_string(),
+        "c:\\windows\\system32.png".to_string(),
+    ];
+
+    // 2. Vertices: Out-of-bounds bone refs
+    model.vertices = vec![
+        Vertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            additional_uvs: Vec::new(),
+            deform: DeformType::Bdef1 { bone: 99 },
+            edge_scale: 1.0,
+        },
+        Vertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            additional_uvs: Vec::new(),
+            deform: DeformType::Bdef2 {
+                bone1: 0,
+                bone2: 99,
+                weight1: 0.5,
+            },
+            edge_scale: 1.0,
+        },
+        Vertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            additional_uvs: Vec::new(),
+            deform: DeformType::Bdef4 {
+                bone1: 0,
+                bone2: 1,
+                bone3: 2,
+                bone4: 99,
+                weight1: 0.25,
+                weight2: 0.25,
+                weight3: 0.25,
+                weight4: 0.25,
+            },
+            edge_scale: 1.0,
+        },
+        Vertex {
+            position: Vec3::ZERO,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            additional_uvs: Vec::new(),
+            deform: DeformType::Sdef {
+                bone1: 0,
+                bone2: 99,
+                weight1: 0.5,
+                c: Vec3::ZERO,
+                r0: Vec3::ZERO,
+                r1: Vec3::ZERO,
+            },
+            edge_scale: 1.0,
+        },
+    ];
+
+    // 3. Materials: Out-of-bounds texture refs
+    model.materials = vec![Material {
+        name_local: "Mat0".to_string(),
+        name_universal: "Mat0".to_string(),
+        diffuse: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        specular: Vec3::new(1.0, 1.0, 1.0),
+        shininess: 10.0,
+        ambient: Vec3::new(1.0, 1.0, 1.0),
+        flags: 0,
+        edge_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        edge_size: 1.0,
+        texture_index: 99,
+        sphere_texture_index: 99,
+        sphere_mode: 0,
+        toon_mode: 0,
+        toon_texture_index: 99,
+        comments: String::new(),
+        surface_count: 0,
+    }];
+
+    // 4. Bones: Parent, inherit, IK out-of-bounds & cycle refs
+    model.bones = vec![
+        Bone {
+            name_local: "Bone0".to_string(),
+            name_universal: "Bone0".to_string(),
+            position: Vec3::ZERO,
+            parent_index: 99,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: Some(InheritTransform {
+                parent_index: 99,
+                influence: 1.0,
+            }),
+            inherit_translation: Some(InheritTransform {
+                parent_index: 99,
+                influence: 1.0,
+            }),
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: Some(Ik {
+                target_index: 99,
+                loop_count: 10,
+                limit_angle: 1.0,
+                links: vec![IkLink {
+                    bone_index: 99,
+                    limit: None,
+                }],
+            }),
+        },
+        Bone {
+            name_local: "Bone1".to_string(),
+            name_universal: "Bone1".to_string(),
+            position: Vec3::ZERO,
+            parent_index: 2,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Bone2".to_string(),
+            name_universal: "Bone2".to_string(),
+            position: Vec3::ZERO,
+            parent_index: 1, // Cycle: 1 -> 2 -> 1
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Bone3".to_string(),
+            name_universal: "Bone3".to_string(),
+            position: Vec3::ZERO,
+            parent_index: 3, // Self cycle
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+    ];
+
+    // 5. Morphs: Group morph cycle checks and index verification
+    model.morphs = vec![
+        Morph {
+            name_local: "Morph0".to_string(),
+            name_universal: "Morph0".to_string(),
+            panel: 1,
+            morph_type: 0,
+            offsets: MorphOffsets::Group(vec![GroupMorphOffset {
+                morph_index: 0, // self cycle
+                influence: 1.0,
+            }]),
+        },
+        Morph {
+            name_local: "Morph1".to_string(),
+            name_universal: "Morph1".to_string(),
+            panel: 1,
+            morph_type: 0,
+            offsets: MorphOffsets::Group(vec![GroupMorphOffset {
+                morph_index: 99, // out of bounds
+                influence: 1.0,
+            }]),
+        },
+        Morph {
+            name_local: "Morph2".to_string(),
+            name_universal: "Morph2".to_string(),
+            panel: 1,
+            morph_type: 1,
+            offsets: MorphOffsets::Vertex(vec![VertexMorphOffset {
+                vertex_index: 99, // out of bounds
+                offset: Vec3::ZERO,
+            }]),
+        },
+        Morph {
+            name_local: "Morph3".to_string(),
+            name_universal: "Morph3".to_string(),
+            panel: 1,
+            morph_type: 2,
+            offsets: MorphOffsets::Bone(vec![BoneMorphOffset {
+                bone_index: 99, // out of bounds
+                translation: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            }]),
+        },
+        Morph {
+            name_local: "Morph4".to_string(),
+            name_universal: "Morph4".to_string(),
+            panel: 1,
+            morph_type: 3,
+            offsets: MorphOffsets::Uv(vec![UvMorphOffset {
+                vertex_index: 99, // out of bounds
+                offset: Vec4::ZERO,
+            }]),
+        },
+        Morph {
+            name_local: "Morph5".to_string(),
+            name_universal: "Morph5".to_string(),
+            panel: 1,
+            morph_type: 8,
+            offsets: MorphOffsets::Material(vec![MaterialMorphOffset {
+                material_index: 99, // out of bounds
+                operation: 0,
+                diffuse: Vec4::ZERO,
+                specular: Vec3::ZERO,
+                shininess: 0.0,
+                ambient: Vec3::ZERO,
+                edge_color: Vec4::ZERO,
+                edge_size: 0.0,
+                texture_tint: Vec4::ZERO,
+                sphere_tint: Vec4::ZERO,
+                toon_tint: Vec4::ZERO,
+            }]),
+        },
+    ];
+
+    // 6. Rigid bodies and joints out-of-bounds references
+    model.rigid_bodies = vec![RigidBody {
+        name_local: "Rb0".to_string(),
+        name_universal: "Rb0".to_string(),
+        bone_index: 99,
+        group: 0,
+        collision_mask: 0,
+        shape: 0,
+        size: Vec3::ZERO,
+        position: Vec3::ZERO,
+        rotation: Vec3::ZERO,
+        mass: 0.0,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        restitution: 0.0,
+        friction: 0.0,
+        mode: 0,
+    }];
+
+    model.joints = vec![Joint {
+        name_local: "Joint0".to_string(),
+        name_universal: "Joint0".to_string(),
+        joint_type: 0,
+        body_a_index: 99,
+        body_b_index: 99,
+        position: Vec3::ZERO,
+        rotation: Vec3::ZERO,
+        linear_limit_min: Vec3::ZERO,
+        linear_limit_max: Vec3::ZERO,
+        angular_limit_min: Vec3::ZERO,
+        angular_limit_max: Vec3::ZERO,
+        linear_stiffness: Vec3::ZERO,
+        angular_stiffness: Vec3::ZERO,
+    }];
+
+    let diagnostics = validate_pmx(&model);
+    assert!(!diagnostics.is_empty());
+}

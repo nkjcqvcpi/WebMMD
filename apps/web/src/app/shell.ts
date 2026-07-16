@@ -4,7 +4,6 @@ import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import type { WasmModelMetadata } from "@webmmd/protocol";
 import { WebMmdViewer } from "@webmmd/viewer";
-import { unzipSync } from "fflate";
 import "../components/inspector.js";
 import initWasm, { WasmModelRuntime } from "../wasm/webmmd_wasm.js";
 
@@ -399,6 +398,12 @@ export class WebMmdAppShell extends LitElement {
           this.viewer.setMorphWeight(index, weight);
         }
       },
+      readPixel: async (x: number, y: number) => {
+        if (this.viewer) {
+          return this.viewer.readPixel(x, y);
+        }
+        return [0, 0, 0, 0];
+      },
       loadModelFromZipUrl: async (url: string, pmxPath: string) => {
         try {
           const res = await fetch(url);
@@ -409,36 +414,37 @@ export class WebMmdAppShell extends LitElement {
           });
 
           const buffer = await file.arrayBuffer();
-          const unzipped = unzipSync(new Uint8Array(buffer));
+          const zipWorker = new Worker(
+            new URL("../workers/zip.worker.ts", import.meta.url),
+            { type: "module" },
+          );
 
-          const decodeFilename = (bytes: Uint8Array): string => {
-            try {
-              return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-            } catch {
-              return new TextDecoder("shift-jis").decode(bytes);
-            }
-          };
+          const result = await new Promise<{ files: any[] }>(
+            (resolve, reject) => {
+              zipWorker.onmessage = (e) => {
+                if (e.data.type === "UNZIP_SUCCESS") {
+                  resolve(e.data);
+                } else {
+                  reject(new Error(e.data.message));
+                }
+              };
+              zipWorker.postMessage({ buffer }, [buffer]);
+            },
+          );
+
+          zipWorker.terminate();
 
           const fileMap = new Map<string, File>();
           const pmxKeys: string[] = [];
 
-          for (const [garbledKey, data] of Object.entries(unzipped)) {
-            if (data.length === 0) continue;
-
-            const bytes = new Uint8Array(
-              garbledKey.split("").map((c) => c.charCodeAt(0)),
-            );
-            const decodedKey = decodeFilename(bytes);
-            const lowerKey = decodedKey.toLowerCase();
-
-            const parts = decodedKey.split("/");
-            const name = parts[parts.length - 1] || "file";
-
-            const f = new File([data], name);
-            fileMap.set(lowerKey, f);
+          for (const f of result.files) {
+            const blob = new Blob([f.data]);
+            const file = new File([blob], f.filename);
+            const lowerKey = f.normalizedKey.toLowerCase();
+            fileMap.set(lowerKey, file);
 
             if (lowerKey.endsWith(".pmx")) {
-              pmxKeys.push(decodedKey);
+              pmxKeys.push(f.normalizedKey);
             }
           }
 
@@ -598,6 +604,9 @@ export class WebMmdAppShell extends LitElement {
     }
 
     if (this.viewer) {
+      this.viewer.setActivePmxPath(
+        pmxKey.substring(pmxKey.lastIndexOf("/") + 1),
+      );
       this.viewer.setVfs(relativeFileMap);
     }
 
@@ -642,10 +651,10 @@ export class WebMmdAppShell extends LitElement {
       if (file.name.toLowerCase().endsWith(".zip")) {
         this.loadZip(arrayBuffer);
       } else {
-        // VFS with single file
-        const fileMap = new Map<string, File>();
-        fileMap.set(file.name.toLowerCase(), file);
-        this.viewer?.setVfs(fileMap);
+        if (this.viewer) {
+          this.viewer.setActivePmxPath(file.name);
+          this.viewer.setVfs(fileMap);
+        }
         this.startParsingWorker(arrayBuffer);
       }
     };
@@ -661,67 +670,57 @@ export class WebMmdAppShell extends LitElement {
     this.parseError = null;
 
     try {
-      const unzipped = unzipSync(new Uint8Array(buffer));
-      const sjisDecoder = new TextDecoder("shift-jis");
+      const zipWorker = new Worker(
+        new URL("../workers/zip.worker.ts", import.meta.url),
+        { type: "module" },
+      );
 
-      // Helper to decode legacy Shift-JIS / UTF-8 zip filenames
-      const decodeFilename = (garbledKey: string): string => {
-        let isUtf8 = false;
-        for (let i = 0; i < garbledKey.length; i++) {
-          if (garbledKey.charCodeAt(i) > 0xff) {
-            isUtf8 = true;
-            break;
+      zipWorker.onmessage = (e) => {
+        const msg = e.data;
+        if (msg.type === "UNZIP_SUCCESS") {
+          const fileMap = new Map<string, File>();
+          const pmxKeys: string[] = [];
+
+          for (const f of msg.files) {
+            const blob = new Blob([f.data]);
+            const file = new File([blob], f.filename);
+            const lowerKey = f.normalizedKey.toLowerCase();
+            fileMap.set(lowerKey, file);
+
+            if (lowerKey.endsWith(".pmx")) {
+              pmxKeys.push(f.normalizedKey);
+            }
           }
+
+          zipWorker.terminate();
+
+          if (pmxKeys.length === 0) {
+            this.parsing = false;
+            this.parseError = "No valid .pmx files found in the zip archive.";
+            return;
+          }
+
+          this.zipFileMap = fileMap;
+
+          if (pmxKeys.length === 1) {
+            this.selectZipPmx(pmxKeys[0]!);
+          } else {
+            this.zipPmxFiles = pmxKeys.map((key) => ({ key, name: key }));
+            this.showPmxSelector = true;
+            this.parsing = false;
+          }
+        } else if (msg.type === "UNZIP_ERROR") {
+          zipWorker.terminate();
+          this.parsing = false;
+          this.parseError = `ZIP Extraction Failed: ${msg.message}`;
         }
-        if (isUtf8) {
-          return garbledKey;
-        }
-        const bytes = new Uint8Array(garbledKey.length);
-        for (let i = 0; i < garbledKey.length; i++) {
-          bytes[i] = garbledKey.charCodeAt(i) & 0xff;
-        }
-        return sjisDecoder.decode(bytes);
       };
 
-      const fileMap = new Map<string, File>();
-      const pmxKeys: string[] = [];
-
-      for (const [garbledKey, data] of Object.entries(unzipped)) {
-        if (garbledKey.endsWith("/")) continue; // Skip directories
-
-        const decodedKey = decodeFilename(garbledKey);
-        const normalizedKey = decodedKey.replace(/\\/g, "/");
-        const filename = normalizedKey.substring(
-          normalizedKey.lastIndexOf("/") + 1,
-        );
-
-        const blob = new Blob([data]);
-        const file = new File([blob], filename);
-        fileMap.set(normalizedKey.toLowerCase(), file);
-
-        if (normalizedKey.toLowerCase().endsWith(".pmx")) {
-          pmxKeys.push(normalizedKey);
-        }
-      }
-
-      if (pmxKeys.length === 0) {
-        this.parsing = false;
-        this.parseError = "No valid .pmx files found in the zip archive.";
-        return;
-      }
-
-      this.zipFileMap = fileMap;
-
-      if (pmxKeys.length === 1) {
-        this.selectZipPmx(pmxKeys[0]!);
-      } else {
-        this.zipPmxFiles = pmxKeys.map((key) => ({ key, name: key }));
-        this.showPmxSelector = true;
-        this.parsing = false;
-      }
+      zipWorker.postMessage({ buffer }, [buffer]);
     } catch (err: any) {
+      console.error("Failed to spawn zip worker:", err);
       this.parsing = false;
-      this.parseError = `Failed to decompress zip archive: ${err.message || err}`;
+      this.parseError = `Failed to unzip: ${err.message || err}`;
     }
   }
 
@@ -753,6 +752,9 @@ export class WebMmdAppShell extends LitElement {
     }
 
     if (this.viewer) {
+      this.viewer.setActivePmxPath(
+        pmxKey.substring(pmxKey.lastIndexOf("/") + 1),
+      );
       this.viewer.setVfs(relativeFileMap);
     }
 
@@ -1174,7 +1176,7 @@ export class WebMmdAppShell extends LitElement {
       <header>
         <div class="brand">
           <div class="logo">WebMMD</div>
-          <div class="version-tag">0.1.2</div>
+          <div class="version-tag">0.1.3</div>
         </div>
         <div class="controls">
           <input

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3] - 2026-07-16
+
+### Added
+
+- Move heavy ZIP archive extraction tasks entirely to background web worker (`zip.worker.ts`) using memory-efficient streams and safety size limit enforcement.
+- Strict VFS (Virtual File System) relative path resolution, filename case-insensitive lookup fallbacks, and persistent texture caching.
+- Visibility change detection automatically suspending the rendering loop when the tab is hidden and resuming when visible.
+- Transparent WebGPU device loss recovery up to 5 attempts, rebuilding resource buffers and texture assets automatically.
+- Service Worker offline caching strategy (`sw.js`) and PWA web app manifest (`manifest.json`) support.
+- Automated GitHub Actions build, formatting, linting, and testing CI/CD configuration.
+- Robust Safari WebDriver Selenium integration test validation including model reloads and render checks.
+
 ## [0.1.2] - 2026-07-16
 
 ### Added
