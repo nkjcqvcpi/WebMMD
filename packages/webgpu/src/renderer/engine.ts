@@ -27,6 +27,14 @@ export interface ModelRenderRange {
   toonMode: number;
 }
 
+export interface PackedMorphMeta {
+  morphIndex: number;
+  nameLocal: string;
+  nameUniversal: string;
+  offsetStart: number;
+  offsetCount: number;
+}
+
 export interface ModelData {
   vertices: ArrayBuffer;
   indices: ArrayBuffer;
@@ -37,6 +45,9 @@ export interface ModelData {
   indexCount: number;
   ranges: ModelRenderRange[];
   textureBitmaps: (ImageBitmap | null)[];
+  vertexMorphMeta: PackedMorphMeta[];
+  uvMorphMeta: PackedMorphMeta[];
+  numMorphs: number;
 }
 
 export class WebGpuRenderer {
@@ -53,15 +64,16 @@ export class WebGpuRenderer {
 
   // Active Model Buffers
   private verticesInputBuffer: GPUBuffer | null = null;
-  private morphedVertexBuffer: GPUBuffer | null = null;
   private renderVertexBuffer: GPUBuffer | null = null;
   private indexBuffer: GPUBuffer | null = null;
   private materialsBuffer: GPUBuffer | null = null;
   private boneMatricesBuffer: GPUBuffer | null = null;
-  private vertexMorphOffsetsBuffer: GPUBuffer | null = null;
-  private uvMorphOffsetsBuffer: GPUBuffer | null = null;
+  private vertexMorphAdjacencyBuffer: GPUBuffer | null = null;
+  private vertexMorphContributionsBuffer: GPUBuffer | null = null;
+  private uvMorphAdjacencyBuffer: GPUBuffer | null = null;
+  private uvMorphContributionsBuffer: GPUBuffer | null = null;
   private cameraUniformBuffer: GPUBuffer | null = null;
-  private morphParamsBuffer: GPUBuffer | null = null;
+  private activeMorphWeightsBuffer: GPUBuffer | null = null;
   private skinningParamsBuffer: GPUBuffer | null = null;
 
   // Active Model Textures
@@ -171,35 +183,13 @@ export class WebGpuRenderer {
       device,
       "Materials Buffer",
       model.materials,
-      GPUBufferUsage.STORAGE,
-    );
-
-    this.vertexMorphOffsetsBuffer = createBufferWithData(
-      device,
-      "Vertex Morph Offsets Buffer",
-      model.vertexMorphOffsets,
-      GPUBufferUsage.STORAGE,
-    );
-
-    this.uvMorphOffsetsBuffer = createBufferWithData(
-      device,
-      "UV Morph Offsets Buffer",
-      model.uvMorphOffsets,
-      GPUBufferUsage.STORAGE,
-    );
-
-    // 2. Allocate runtime buffers
-    this.morphedVertexBuffer = createBuffer(
-      device,
-      "Morphed Vertex Buffer",
-      model.vertexCount * 32, // Struct MorphedVertex: pos(12) + norm(12) + uv(8) = 32
-      GPUBufferUsage.STORAGE,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     );
 
     this.renderVertexBuffer = createBuffer(
       device,
       "Render Vertex Buffer",
-      model.vertexCount * 32, // Struct RenderVertex: pos(12) + norm(12) + uv(8) = 32
+      model.vertexCount * 32, // Struct RenderVertex: pos(12) + normal_x/y/z(12) + u/v(8) = 32
       GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE,
     );
 
@@ -220,14 +210,6 @@ export class WebGpuRenderer {
     }
     device.queue.writeBuffer(this.boneMatricesBuffer, 0, identityMatrices);
 
-    const alignment = device.limits.minUniformBufferOffsetAlignment;
-    this.morphParamsBuffer = createBuffer(
-      device,
-      "Morph Params Buffer",
-      128 * alignment, // support up to 128 active morphs
-      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    );
-
     this.skinningParamsBuffer = createBuffer(
       device,
       "Skinning Params Buffer",
@@ -237,6 +219,151 @@ export class WebGpuRenderer {
     // Write skinning parameters
     const skinParams = new Uint32Array([model.vertexCount, 0, 0, 0]);
     device.queue.writeBuffer(this.skinningParamsBuffer, 0, skinParams);
+
+    // Build vertex morph adjacency and contributions
+    const contributionsByVertex: {
+      morphIndex: number;
+      x: number;
+      y: number;
+      z: number;
+    }[][] = Array.from({ length: model.vertexCount }, () => []);
+    const vOffsetUint = new Uint32Array(model.vertexMorphOffsets);
+    const vOffsetFloat = new Float32Array(model.vertexMorphOffsets);
+    const stride = 8; // 32 bytes / 4
+
+    for (const m of model.vertexMorphMeta) {
+      const morphIdx = m.morphIndex;
+      const start = m.offsetStart;
+      const count = m.offsetCount;
+      for (let i = 0; i < count; i++) {
+        const idx = (start + i) * stride;
+        const vIdx = vOffsetUint[idx];
+        if (vIdx !== undefined && vIdx < model.vertexCount) {
+          const x = vOffsetFloat[idx + 4] ?? 0;
+          const y = vOffsetFloat[idx + 5] ?? 0;
+          const z = vOffsetFloat[idx + 6] ?? 0;
+          contributionsByVertex[vIdx]!.push({ morphIndex: morphIdx, x, y, z });
+        }
+      }
+    }
+
+    const vertexAdjacencyData = new Uint32Array(model.vertexCount * 2);
+    const vertexContributionsList: {
+      morphIndex: number;
+      x: number;
+      y: number;
+      z: number;
+    }[] = [];
+
+    for (let vIdx = 0; vIdx < model.vertexCount; vIdx++) {
+      const list = contributionsByVertex[vIdx]!;
+      const start = vertexContributionsList.length;
+      const count = list.length;
+      vertexAdjacencyData[vIdx * 2] = start;
+      vertexAdjacencyData[vIdx * 2 + 1] = count;
+      for (const item of list) {
+        vertexContributionsList.push(item);
+      }
+    }
+
+    // VertexMorphContribution layout: morph_index (4 bytes), offset_x (4 bytes), offset_y (4 bytes), offset_z (4 bytes) = 16 bytes
+    const vertexContributionsData = new Float32Array(
+      Math.max(1, vertexContributionsList.length) * 4,
+    );
+    for (let i = 0; i < vertexContributionsList.length; i++) {
+      const item = vertexContributionsList[i]!;
+      vertexContributionsData[i * 4] = item.morphIndex;
+      vertexContributionsData[i * 4 + 1] = item.x;
+      vertexContributionsData[i * 4 + 2] = item.y;
+      vertexContributionsData[i * 4 + 3] = item.z;
+    }
+
+    // Build UV morph adjacency and contributions
+    const uvContributionsByVertex: {
+      morphIndex: number;
+      u: number;
+      v: number;
+    }[][] = Array.from({ length: model.vertexCount }, () => []);
+    const uvOffsetUint = new Uint32Array(model.uvMorphOffsets);
+    const uvOffsetFloat = new Float32Array(model.uvMorphOffsets);
+
+    for (const m of model.uvMorphMeta) {
+      const morphIdx = m.morphIndex;
+      const start = m.offsetStart;
+      const count = m.offsetCount;
+      for (let i = 0; i < count; i++) {
+        const idx = (start + i) * stride;
+        const vIdx = uvOffsetUint[idx];
+        if (vIdx !== undefined && vIdx < model.vertexCount) {
+          const u = uvOffsetFloat[idx + 4] ?? 0;
+          const v = uvOffsetFloat[idx + 5] ?? 0;
+          uvContributionsByVertex[vIdx]!.push({ morphIndex: morphIdx, u, v });
+        }
+      }
+    }
+
+    const uvAdjacencyData = new Uint32Array(model.vertexCount * 2);
+    const uvContributionsList: { morphIndex: number; u: number; v: number }[] =
+      [];
+
+    for (let vIdx = 0; vIdx < model.vertexCount; vIdx++) {
+      const list = uvContributionsByVertex[vIdx]!;
+      const start = uvContributionsList.length;
+      const count = list.length;
+      uvAdjacencyData[vIdx * 2] = start;
+      uvAdjacencyData[vIdx * 2 + 1] = count;
+      for (const item of list) {
+        uvContributionsList.push(item);
+      }
+    }
+
+    // UvMorphContribution layout: morph_index (4 bytes), offset_u (4 bytes), offset_v (4 bytes), padding (4 bytes) = 16 bytes
+    const uvContributionsData = new Float32Array(
+      Math.max(1, uvContributionsList.length) * 4,
+    );
+    for (let i = 0; i < uvContributionsList.length; i++) {
+      const item = uvContributionsList[i]!;
+      uvContributionsData[i * 4] = item.morphIndex;
+      uvContributionsData[i * 4 + 1] = item.u;
+      uvContributionsData[i * 4 + 2] = item.v;
+      uvContributionsData[i * 4 + 3] = 0.0; // padding
+    }
+
+    // Allocate GPU buffers
+    this.vertexMorphAdjacencyBuffer = createBufferWithData(
+      device,
+      "Vertex Morph Adjacency Buffer",
+      vertexAdjacencyData.buffer,
+      GPUBufferUsage.STORAGE,
+    );
+
+    this.vertexMorphContributionsBuffer = createBufferWithData(
+      device,
+      "Vertex Morph Contributions Buffer",
+      vertexContributionsData.buffer,
+      GPUBufferUsage.STORAGE,
+    );
+
+    this.uvMorphAdjacencyBuffer = createBufferWithData(
+      device,
+      "UV Morph Adjacency Buffer",
+      uvAdjacencyData.buffer,
+      GPUBufferUsage.STORAGE,
+    );
+
+    this.uvMorphContributionsBuffer = createBufferWithData(
+      device,
+      "UV Morph Contributions Buffer",
+      uvContributionsData.buffer,
+      GPUBufferUsage.STORAGE,
+    );
+
+    this.activeMorphWeightsBuffer = createBuffer(
+      device,
+      "Active Morph Weights Buffer",
+      Math.max(1, model.numMorphs) * 4,
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    );
 
     // 3. Load textures
     this.textures = [];
@@ -267,16 +394,17 @@ export class WebGpuRenderer {
       layout: this.computePipelines.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.verticesInputBuffer } },
-        { binding: 1, resource: { buffer: this.morphedVertexBuffer } },
-        { binding: 2, resource: { buffer: this.renderVertexBuffer } },
-        { binding: 3, resource: { buffer: this.boneMatricesBuffer } },
-        { binding: 4, resource: { buffer: this.vertexMorphOffsetsBuffer } },
-        { binding: 5, resource: { buffer: this.uvMorphOffsetsBuffer } },
+        { binding: 1, resource: { buffer: this.renderVertexBuffer } },
+        { binding: 2, resource: { buffer: this.boneMatricesBuffer } },
+        { binding: 3, resource: { buffer: this.vertexMorphAdjacencyBuffer } },
         {
-          binding: 6,
-          resource: { buffer: this.morphParamsBuffer, offset: 0, size: 16 },
+          binding: 4,
+          resource: { buffer: this.vertexMorphContributionsBuffer },
         },
-        { binding: 7, resource: { buffer: this.skinningParamsBuffer } },
+        { binding: 5, resource: { buffer: this.uvMorphAdjacencyBuffer } },
+        { binding: 6, resource: { buffer: this.uvMorphContributionsBuffer } },
+        { binding: 7, resource: { buffer: this.activeMorphWeightsBuffer } },
+        { binding: 8, resource: { buffer: this.skinningParamsBuffer } },
       ],
     });
 
@@ -334,15 +462,13 @@ export class WebGpuRenderer {
     device.queue.writeBuffer(this.boneMatricesBuffer, 0, matrices as any);
   }
 
-  computeDeform(
-    activeMorphs: {
-      type: "vertex" | "uv";
-      start: number;
-      count: number;
-      weight: number;
-      channel: number;
-    }[],
-  ) {
+  updateMaterials(materials: Float32Array) {
+    if (!this.context || !this.materialsBuffer) return;
+    const { device } = this.context;
+    device.queue.writeBuffer(this.materialsBuffer, 0, materials as any);
+  }
+
+  computeDeform(weights: Float32Array) {
     if (
       !this.context ||
       !this.computePipelines ||
@@ -352,6 +478,8 @@ export class WebGpuRenderer {
       return;
     const { device } = this.context;
 
+    device.queue.writeBuffer(this.activeMorphWeightsBuffer!, 0, weights as any);
+
     const commandEncoder = device.createCommandEncoder({
       label: "Compute Deform Encoder",
     });
@@ -359,54 +487,9 @@ export class WebGpuRenderer {
       label: "Deform Compute Pass",
     });
 
-    // 1. Reset positions (with default dynamic offset of 0)
-    computePass.setPipeline(this.computePipelines.reset);
-    computePass.setBindGroup(0, this.computeBindGroup, [0]);
+    computePass.setPipeline(this.computePipelines.deform);
+    computePass.setBindGroup(0, this.computeBindGroup);
     const workgroupCount = Math.ceil(this.modelData.vertexCount / 64);
-    computePass.dispatchWorkgroups(workgroupCount);
-
-    // 2. Accumulate active morphs using dynamic uniform offsets
-    const alignment = device.limits.minUniformBufferOffsetAlignment;
-    const validMorphs = activeMorphs.filter(
-      (m) => m.weight > 0.0 && m.count > 0,
-    );
-
-    if (validMorphs.length > 0) {
-      const totalSize = validMorphs.length * alignment;
-      const bufferData = new ArrayBuffer(totalSize);
-      const f32View = new Float32Array(bufferData);
-      const u32View = new Uint32Array(bufferData);
-
-      for (let i = 0; i < validMorphs.length; i++) {
-        const morph = validMorphs[i]!;
-        const elementOffset = i * (alignment / 4);
-        f32View[elementOffset + 0] = morph.weight;
-        u32View[elementOffset + 1] = morph.start;
-        u32View[elementOffset + 2] = morph.count;
-        u32View[elementOffset + 3] = morph.channel;
-      }
-
-      device.queue.writeBuffer(this.morphParamsBuffer!, 0, bufferData);
-
-      for (let i = 0; i < validMorphs.length; i++) {
-        const morph = validMorphs[i]!;
-        const dynamicOffset = i * alignment;
-
-        computePass.setBindGroup(0, this.computeBindGroup, [dynamicOffset]);
-
-        if (morph.type === "vertex") {
-          computePass.setPipeline(this.computePipelines.vertexMorph);
-        } else {
-          computePass.setPipeline(this.computePipelines.uvMorph);
-        }
-        const morphWorkgroups = Math.ceil(morph.count / 64);
-        computePass.dispatchWorkgroups(morphWorkgroups);
-      }
-    }
-
-    // 3. Run skinning (with default dynamic offset of 0)
-    computePass.setPipeline(this.computePipelines.skin);
-    computePass.setBindGroup(0, this.computeBindGroup, [0]);
     computePass.dispatchWorkgroups(workgroupCount);
 
     computePass.end();
@@ -505,14 +588,15 @@ export class WebGpuRenderer {
 
   disposeModel() {
     this.verticesInputBuffer?.destroy();
-    this.morphedVertexBuffer?.destroy();
     this.renderVertexBuffer?.destroy();
     this.indexBuffer?.destroy();
     this.materialsBuffer?.destroy();
     this.boneMatricesBuffer?.destroy();
-    this.vertexMorphOffsetsBuffer?.destroy();
-    this.uvMorphOffsetsBuffer?.destroy();
-    this.morphParamsBuffer?.destroy();
+    this.vertexMorphAdjacencyBuffer?.destroy();
+    this.vertexMorphContributionsBuffer?.destroy();
+    this.uvMorphAdjacencyBuffer?.destroy();
+    this.uvMorphContributionsBuffer?.destroy();
+    this.activeMorphWeightsBuffer?.destroy();
     this.skinningParamsBuffer?.destroy();
 
     for (const tex of this.textures) {

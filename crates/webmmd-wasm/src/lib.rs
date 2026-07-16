@@ -92,6 +92,8 @@ struct WasmBoneMeta {
     parent_index: i32,
     transform_layer: i32,
     flags: u16,
+    ik_target_index: Option<i32>,
+    ik_link_indices: Option<Vec<i32>>,
 }
 
 #[derive(serde::Serialize)]
@@ -167,6 +169,11 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
             parent_index: b.parent_index,
             transform_layer: b.transform_layer,
             flags: b.flags,
+            ik_target_index: b.ik.as_ref().map(|ik| ik.target_index),
+            ik_link_indices: b
+                .ik
+                .as_ref()
+                .map(|ik| ik.links.iter().map(|l| l.bone_index).collect()),
         })
         .collect();
 
@@ -252,4 +259,162 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
         additional_uvs: packed.additional_uvs_bin,
         metadata_json,
     })
+}
+
+use webmmd_core::math::{Quat, Vec3};
+use webmmd_core::runtime::ModelRuntime;
+
+#[wasm_bindgen]
+pub struct WasmModelRuntime {
+    runtime: ModelRuntime,
+    flat_skin_matrices: Vec<f32>,
+    flat_material_states: Vec<f32>,
+}
+
+#[wasm_bindgen]
+impl WasmModelRuntime {
+    #[wasm_bindgen(constructor)]
+    pub fn new(pmx_data: &[u8]) -> Result<WasmModelRuntime, JsValue> {
+        let model = parse_pmx(pmx_data)
+            .map_err(|e| JsValue::from_str(&format!("PMX parse error: {}", e)))?;
+        let runtime = ModelRuntime::new(model);
+
+        let num_bones = runtime.model.bones.len();
+        let num_materials = runtime.base_materials.len();
+
+        Ok(WasmModelRuntime {
+            runtime,
+            flat_skin_matrices: vec![0.0; num_bones * 16],
+            flat_material_states: vec![0.0; num_materials * 28],
+        })
+    }
+
+    pub fn set_morph_weight(&mut self, index: usize, weight: f32) {
+        self.runtime.set_morph_weight(index, weight);
+    }
+
+    pub fn set_bone_pose(&mut self, index: usize, translation: &[f32], rotation: &[f32]) {
+        let trans = if translation.len() >= 3 {
+            Vec3::new(translation[0], translation[1], translation[2])
+        } else {
+            Vec3::ZERO
+        };
+        let rot = if rotation.len() >= 4 {
+            Quat::new(rotation[0], rotation[1], rotation[2], rotation[3])
+        } else {
+            Quat::IDENTITY
+        };
+        self.runtime.set_bone_pose(index, trans, rot);
+    }
+
+    pub fn reset_pose(&mut self) {
+        self.runtime.reset_pose();
+    }
+
+    pub fn evaluate(&mut self) {
+        self.runtime.evaluate();
+
+        // Update flat skin matrices
+        let skin_mats = self.runtime.get_skin_matrices();
+        self.flat_skin_matrices.clear();
+        for mat in skin_mats {
+            self.flat_skin_matrices.extend_from_slice(&mat.m);
+        }
+
+        // Update flat material states
+        self.flat_material_states = self.runtime.get_material_states();
+    }
+
+    pub fn get_skin_matrices_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.flat_skin_matrices) }
+    }
+
+    pub fn get_material_states_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.flat_material_states) }
+    }
+
+    pub fn get_morph_weights_view(&self) -> js_sys::Float32Array {
+        unsafe { js_sys::Float32Array::view(&self.runtime.morph_weights) }
+    }
+
+    pub fn get_morph_weight(&self, index: usize) -> f32 {
+        self.runtime
+            .morph_weights
+            .get(index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    pub fn get_input_morph_weight(&self, index: usize) -> f32 {
+        self.runtime
+            .input_morph_weights
+            .get(index)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    pub fn get_bone_world_matrix(&self, index: usize) -> Option<Vec<f32>> {
+        self.runtime.world_matrices.get(index).map(|m| m.m.to_vec())
+    }
+
+    pub fn get_bone_local_translation(&self, index: usize) -> Option<Vec<f32>> {
+        if index >= self.runtime.model.bones.len() {
+            return None;
+        }
+        let t = self
+            .runtime
+            .manual_translations
+            .get(index)
+            .copied()
+            .unwrap_or(Vec3::ZERO)
+            .add(
+                self.runtime
+                    .morph_translations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Vec3::ZERO),
+            )
+            .add(
+                self.runtime
+                    .append_translations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Vec3::ZERO),
+            );
+        Some(vec![t.x, t.y, t.z])
+    }
+
+    pub fn get_bone_local_rotation(&self, index: usize) -> Option<Vec<f32>> {
+        if index >= self.runtime.model.bones.len() {
+            return None;
+        }
+        let r = self
+            .runtime
+            .manual_rotations
+            .get(index)
+            .copied()
+            .unwrap_or(Quat::IDENTITY)
+            .mul(
+                self.runtime
+                    .morph_rotations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Quat::IDENTITY),
+            )
+            .mul(
+                self.runtime
+                    .append_rotations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Quat::IDENTITY),
+            )
+            .mul(
+                self.runtime
+                    .ik_rotations
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Quat::IDENTITY),
+            );
+        Some(vec![r.x, r.y, r.z, r.w])
+    }
 }

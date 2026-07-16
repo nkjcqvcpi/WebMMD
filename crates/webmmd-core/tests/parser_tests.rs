@@ -85,3 +85,342 @@ fn test_parse_truncated_data() {
     let result = parse_pmx(truncated_data);
     assert!(matches!(result, Err(PmxParseError::UnexpectedEof)));
 }
+
+use webmmd_core::pmx::types::{
+    Bone, BoneMorphOffset, GroupMorphOffset, Ik, IkLink, InheritTransform, Material,
+    MaterialMorphOffset, Morph, MorphOffsets, PmxModel,
+};
+use webmmd_core::runtime::ModelRuntime;
+
+fn create_dummy_model() -> PmxModel {
+    PmxModel {
+        version: 2.0,
+        name_local: "Dummy".to_string(),
+        name_universal: "Dummy".to_string(),
+        comments_local: String::new(),
+        comments_universal: String::new(),
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        textures: Vec::new(),
+        materials: Vec::new(),
+        bones: Vec::new(),
+        morphs: Vec::new(),
+        rigid_bodies: Vec::new(),
+        joints: Vec::new(),
+        soft_bodies: Vec::new(),
+    }
+}
+
+#[test]
+fn test_quat_euler_xyz_conversions() {
+    let angles = [(0.1f32, 0.2f32, 0.3f32), (-0.5, 0.8, -1.2), (0.0, 1.5, 0.0)];
+    for (x, y, z) in angles {
+        let q = Quat::from_euler_xyz(x, y, z);
+        let euler = q.to_euler_xyz();
+        let reconstructed = Quat::from_euler_xyz(euler.x, euler.y, euler.z);
+        assert!((reconstructed.dot(q).abs() - 1.0).abs() < 1e-4);
+    }
+}
+
+#[test]
+fn test_group_flip_morph_graph() {
+    let mut model = create_dummy_model();
+    model.morphs = vec![
+        Morph {
+            name_local: "M0".to_string(),
+            name_universal: "M0".to_string(),
+            panel: 1,
+            morph_type: 0,
+            offsets: MorphOffsets::Group(vec![
+                GroupMorphOffset {
+                    morph_index: 1,
+                    influence: 0.5,
+                },
+                GroupMorphOffset {
+                    morph_index: 2,
+                    influence: 1.5,
+                },
+            ]),
+        },
+        Morph {
+            name_local: "M1".to_string(),
+            name_universal: "M1".to_string(),
+            panel: 1,
+            morph_type: 1,
+            offsets: MorphOffsets::Vertex(Vec::new()),
+        },
+        Morph {
+            name_local: "M2".to_string(),
+            name_universal: "M2".to_string(),
+            panel: 1,
+            morph_type: 0,
+            offsets: MorphOffsets::Group(vec![GroupMorphOffset {
+                morph_index: 3,
+                influence: 2.0,
+            }]),
+        },
+        Morph {
+            name_local: "M3".to_string(),
+            name_universal: "M3".to_string(),
+            panel: 1,
+            morph_type: 1,
+            offsets: MorphOffsets::Vertex(Vec::new()),
+        },
+    ];
+
+    let mut runtime = ModelRuntime::new(model);
+    runtime.set_morph_weight(0, 1.0);
+    runtime.evaluate();
+
+    assert_eq!(runtime.morph_weights[0], 1.0);
+    assert_eq!(runtime.morph_weights[1], 0.5);
+    assert_eq!(runtime.morph_weights[2], 1.5);
+    assert_eq!(runtime.morph_weights[3], 3.0);
+}
+
+#[test]
+fn test_bone_morph() {
+    let mut model = create_dummy_model();
+    model.bones = vec![Bone {
+        name_local: "Bone0".to_string(),
+        name_universal: "Bone0".to_string(),
+        position: Vec3::ZERO,
+        parent_index: -1,
+        transform_layer: 0,
+        flags: 0,
+        tail_position: Vec3::ZERO,
+        tail_index: -1,
+        inherit_rotation: None,
+        inherit_translation: None,
+        fixed_axis: None,
+        local_coordinate: None,
+        external_parent: None,
+        ik: None,
+    }];
+    model.morphs = vec![Morph {
+        name_local: "BM0".to_string(),
+        name_universal: "BM0".to_string(),
+        panel: 1,
+        morph_type: 2,
+        offsets: MorphOffsets::Bone(vec![BoneMorphOffset {
+            bone_index: 0,
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 1.0),
+        }]),
+    }];
+
+    let mut runtime = ModelRuntime::new(model);
+    runtime.set_morph_weight(0, 0.5);
+    runtime.evaluate();
+
+    assert!((runtime.morph_translations[0].x - 0.5).abs() < 1e-4);
+    assert!((runtime.morph_translations[0].y - 1.0).abs() < 1e-4);
+    assert!((runtime.morph_translations[0].z - 1.5).abs() < 1e-4);
+
+    let expected_rot =
+        Quat::IDENTITY.slerp(Quat::from_axis_angle(Vec3::new(0.0, 1.0, 0.0), 1.0), 0.5);
+    assert!((runtime.morph_rotations[0].dot(expected_rot).abs() - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn test_material_morph() {
+    let mut model = create_dummy_model();
+    model.materials = vec![Material {
+        name_local: "Mat0".to_string(),
+        name_universal: "Mat0".to_string(),
+        diffuse: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        specular: Vec3::new(1.0, 1.0, 1.0),
+        shininess: 10.0,
+        ambient: Vec3::new(1.0, 1.0, 1.0),
+        flags: 0,
+        edge_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+        edge_size: 1.0,
+        texture_index: -1,
+        sphere_texture_index: -1,
+        sphere_mode: 0,
+        toon_mode: 0,
+        toon_texture_index: -1,
+        comments: String::new(),
+        surface_count: 0,
+    }];
+    model.morphs = vec![Morph {
+        name_local: "MM0".to_string(),
+        name_universal: "MM0".to_string(),
+        panel: 1,
+        morph_type: 8,
+        offsets: MorphOffsets::Material(vec![MaterialMorphOffset {
+            material_index: 0,
+            operation: 0,
+            diffuse: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            specular: Vec3::new(0.5, 0.5, 0.5),
+            shininess: 0.5,
+            ambient: Vec3::new(0.5, 0.5, 0.5),
+            edge_color: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            edge_size: 0.5,
+            texture_tint: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            sphere_tint: Vec4::new(0.5, 0.5, 0.5, 1.0),
+            toon_tint: Vec4::new(0.5, 0.5, 0.5, 1.0),
+        }]),
+    }];
+
+    let mut runtime = ModelRuntime::new(model);
+    runtime.set_morph_weight(0, 1.0);
+    runtime.evaluate();
+
+    assert!((runtime.material_states[0].diffuse.x - 0.5).abs() < 1e-4);
+    assert!((runtime.material_states[0].edge_size - 0.5).abs() < 1e-4);
+
+    let states = runtime.get_material_states();
+    assert_eq!(states.len(), 28);
+}
+
+#[test]
+fn test_append_grants() {
+    let mut model = create_dummy_model();
+    model.bones = vec![
+        Bone {
+            name_local: "Parent".to_string(),
+            name_universal: "Parent".to_string(),
+            position: Vec3::ZERO,
+            parent_index: -1,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Child".to_string(),
+            name_universal: "Child".to_string(),
+            position: Vec3::new(0.0, 1.0, 0.0),
+            parent_index: 0,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: Some(InheritTransform {
+                parent_index: 0,
+                influence: 0.5,
+            }),
+            inherit_translation: Some(InheritTransform {
+                parent_index: 0,
+                influence: 0.5,
+            }),
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+    ];
+
+    let mut runtime = ModelRuntime::new(model);
+    runtime.set_bone_pose(
+        0,
+        Vec3::new(2.0, 0.0, 0.0),
+        Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 1.0),
+    );
+    runtime.evaluate();
+
+    assert!((runtime.append_translations[1].x - 1.0).abs() < 1e-4);
+
+    let expected_rot =
+        Quat::IDENTITY.slerp(Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 1.0), 0.5);
+    assert!((runtime.append_rotations[1].dot(expected_rot).abs() - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn test_ik_solvers() {
+    let mut model = create_dummy_model();
+    model.bones = vec![
+        Bone {
+            name_local: "Root".to_string(),
+            name_universal: "Root".to_string(),
+            position: Vec3::ZERO,
+            parent_index: -1,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Joint1".to_string(),
+            name_universal: "Joint1".to_string(),
+            position: Vec3::new(0.0, 1.0, 0.0),
+            parent_index: 0,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Effector".to_string(),
+            name_universal: "Effector".to_string(),
+            position: Vec3::new(0.0, 2.0, 0.0),
+            parent_index: 1,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: None,
+        },
+        Bone {
+            name_local: "Target".to_string(),
+            name_universal: "Target".to_string(),
+            position: Vec3::new(1.0, 1.0, 0.0),
+            parent_index: -1,
+            transform_layer: 0,
+            flags: 0,
+            tail_position: Vec3::ZERO,
+            tail_index: -1,
+            inherit_rotation: None,
+            inherit_translation: None,
+            fixed_axis: None,
+            local_coordinate: None,
+            external_parent: None,
+            ik: Some(Ik {
+                target_index: 2,
+                loop_count: 20,
+                limit_angle: 0.5,
+                links: vec![
+                    IkLink {
+                        bone_index: 1,
+                        limit: None,
+                    },
+                    IkLink {
+                        bone_index: 0,
+                        limit: None,
+                    },
+                ],
+            }),
+        },
+    ];
+
+    let mut runtime = ModelRuntime::new(model);
+    runtime.evaluate();
+
+    let final_effector_pos = runtime.world_matrices[2].transform_point(Vec3::ZERO);
+    let dist = final_effector_pos.sub(Vec3::new(1.0, 1.0, 0.0)).length();
+    assert!(dist < 0.1);
+}

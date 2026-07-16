@@ -6,6 +6,7 @@ import type { WasmModelMetadata } from "@webmmd/protocol";
 import { WebMmdViewer } from "@webmmd/viewer";
 import { unzipSync } from "fflate";
 import "../components/inspector.js";
+import initWasm, { WasmModelRuntime } from "../wasm/webmmd_wasm.js";
 
 @customElement("webmmd-app-shell")
 export class WebMmdAppShell extends LitElement {
@@ -18,9 +19,18 @@ export class WebMmdAppShell extends LitElement {
   @state() private showLicenseModal: boolean = false;
   @state() private licenseAccepted: boolean = false;
 
+  @state() private debugSkeleton: boolean = false;
+  @state() private debugIkTarget: boolean = false;
+  @state() private debugIkLinks: boolean = false;
+  @state() private debugSelectedBone: boolean = false;
+  @state() private debugBounds: boolean = false;
+  @state() private selectedBoneIndex: number = -1;
+
   private worker: Worker | null = null;
   private viewer: WebMmdViewer | null = null;
   private zipFileMap: Map<string, File> = new Map();
+  private wasmInitialized = false;
+  private pmxDataCopy: ArrayBuffer | null = null;
 
   static styles = css`
     :host {
@@ -467,6 +477,12 @@ export class WebMmdAppShell extends LitElement {
         this.parseError = err.message || "WebGPU initialization failed.";
       }
     }
+
+    const tick = () => {
+      this.drawDebugOverlay();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }
 
   private handleDragOver = (e: DragEvent) => {
@@ -758,10 +774,19 @@ export class WebMmdAppShell extends LitElement {
     this.zipFileMap.clear();
   }
 
+  private async ensureWasm() {
+    if (!this.wasmInitialized) {
+      await initWasm();
+      this.wasmInitialized = true;
+    }
+  }
+
   private startParsingWorker(buffer: ArrayBuffer) {
     if (this.worker) {
       this.worker.terminate();
     }
+
+    this.pmxDataCopy = buffer.slice(0);
 
     this.worker = new Worker(
       new URL("../workers/parser.worker.ts", import.meta.url),
@@ -775,27 +800,33 @@ export class WebMmdAppShell extends LitElement {
         this.metadata = msg.metadata;
 
         console.log("[App Shell] PMX successfully parsed! Loading into GPU...");
-        if (this.viewer) {
-          this.viewer
-            .loadModel(
-              msg.metadata,
-              msg.vertices,
-              msg.indices,
-              msg.materials,
-              msg.vertexMorphOffsets,
-              msg.uvMorphOffsets,
-              msg.additionalUvs,
-            )
-            .then(() => {
-              if ((window as any).__webmmdTest) {
-                (window as any).__webmmdTest.loaded = true;
-                (window as any).__webmmdTest.metadata = msg.metadata;
-              }
-            })
-            .catch((err: any) => {
-              console.error("Failed to load model into WebGPU:", err);
-              this.parseError = `GPU Loading Failed: ${err.message || err}`;
-            });
+        if (this.viewer && this.pmxDataCopy) {
+          const pmxUint8 = new Uint8Array(this.pmxDataCopy);
+          this.ensureWasm().then(() => {
+            if (!this.viewer) return;
+            const runtime = new WasmModelRuntime(pmxUint8);
+            this.viewer
+              .loadModel(
+                msg.metadata,
+                msg.vertices,
+                msg.indices,
+                msg.materials,
+                msg.vertexMorphOffsets,
+                msg.uvMorphOffsets,
+                msg.additionalUvs,
+                runtime,
+              )
+              .then(() => {
+                if ((window as any).__webmmdTest) {
+                  (window as any).__webmmdTest.loaded = true;
+                  (window as any).__webmmdTest.metadata = msg.metadata;
+                }
+              })
+              .catch((err: any) => {
+                console.error("Failed to load model into WebGPU:", err);
+                this.parseError = `GPU Loading Failed: ${err.message || err}`;
+              });
+          });
         }
       } else if (msg.type === "LOAD_PMX_ERROR") {
         this.parsing = false;
@@ -811,6 +842,229 @@ export class WebMmdAppShell extends LitElement {
       [buffer],
     );
   }
+
+  private handleDebugToggle = (e: Event) => {
+    const { flag, value } = (e as CustomEvent).detail;
+    if (flag === "skeleton") this.debugSkeleton = value;
+    if (flag === "ikTarget") this.debugIkTarget = value;
+    if (flag === "ikLinks") this.debugIkLinks = value;
+    if (flag === "bounds") this.debugBounds = value;
+  };
+
+  private handleBoneSelect = (e: Event) => {
+    const { index } = (e as CustomEvent).detail;
+    this.selectedBoneIndex = index;
+    this.debugSelectedBone = true;
+  };
+
+  private drawDebugOverlay = () => {
+    if (!this.viewer || !this.metadata) return;
+    const canvas = this.shadowRoot?.getElementById(
+      "debug-canvas",
+    ) as HTMLCanvasElement;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = rect.width * dpr;
+    const height = rect.height * dpr;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    const runtime = this.viewer.getRuntime();
+    if (!runtime) {
+      ctx.restore();
+      return;
+    }
+
+    const camera = this.viewer.getCamera();
+    const aspect = rect.width / rect.height;
+    const { viewProjection } = camera.getMatrices(aspect);
+
+    const projectPoint = (
+      pos: [number, number, number],
+    ): [number, number] | null => {
+      const [x, y, z] = pos;
+      const vp = viewProjection;
+      const w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+      if (w <= 0.0) return null;
+      const xp = (vp[0] * x + vp[4] * y + vp[8] * z + vp[12]) / w;
+      const yp = (vp[1] * x + vp[5] * y + vp[9] * z + vp[13]) / w;
+      return [(xp * 0.5 + 0.5) * rect.width, (-yp * 0.5 + 0.5) * rect.height];
+    };
+
+    const getBonePos = (idx: number): [number, number, number] | null => {
+      const mat = runtime.get_bone_world_matrix(idx);
+      if (!mat) return null;
+      return [mat[12]!, mat[13]!, mat[14]!];
+    };
+
+    // 1. Draw Skeleton Lines
+    if (this.debugSkeleton) {
+      ctx.strokeStyle = "rgba(129, 140, 248, 0.6)"; // Sleek Indigo
+      ctx.lineWidth = 2;
+      for (let i = 0; i < this.metadata.bones.length; i++) {
+        const bone = this.metadata.bones[i]!;
+        if (
+          bone.parentIndex >= 0 &&
+          bone.parentIndex < this.metadata.bones.length
+        ) {
+          const p1 = getBonePos(i);
+          const p2 = getBonePos(bone.parentIndex);
+          if (p1 && p2) {
+            const s1 = projectPoint(p1);
+            const s2 = projectPoint(p2);
+            if (s1 && s2) {
+              ctx.beginPath();
+              ctx.moveTo(s1[0], s1[1]);
+              ctx.lineTo(s2[0], s2[1]);
+              ctx.stroke();
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Draw IK targets & links
+    for (let i = 0; i < this.metadata.bones.length; i++) {
+      const bone = this.metadata.bones[i]!;
+      if (bone.ikTargetIndex !== undefined && bone.ikTargetIndex >= 0) {
+        const targetPos = getBonePos(bone.ikTargetIndex);
+
+        // Draw Target
+        if (this.debugIkTarget && targetPos) {
+          const sTarget = projectPoint(targetPos);
+          if (sTarget) {
+            ctx.fillStyle = "rgba(239, 68, 68, 0.85)";
+            ctx.beginPath();
+            ctx.arc(sTarget[0], sTarget[1], 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = "#ef4444";
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(sTarget[0] - 8, sTarget[1] - 8, 16, 16);
+          }
+        }
+
+        // Draw Links
+        if (this.debugIkLinks && bone.ikLinkIndices) {
+          ctx.strokeStyle = "rgba(245, 158, 11, 0.8)";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+
+          let lastPos = getBonePos(i);
+          for (const linkIdx of bone.ikLinkIndices) {
+            const linkPos = getBonePos(linkIdx);
+            if (lastPos && linkPos) {
+              const s1 = projectPoint(lastPos);
+              const s2 = projectPoint(linkPos);
+              if (s1 && s2) {
+                ctx.beginPath();
+                ctx.moveTo(s1[0], s1[1]);
+                ctx.lineTo(s2[0], s2[1]);
+                ctx.stroke();
+              }
+            }
+            lastPos = linkPos;
+          }
+          ctx.setLineDash([]);
+        }
+      }
+    }
+
+    // 3. Draw Selected Bone
+    if (
+      this.debugSelectedBone &&
+      this.selectedBoneIndex >= 0 &&
+      this.selectedBoneIndex < this.metadata.bones.length
+    ) {
+      const pos = getBonePos(this.selectedBoneIndex);
+      const bone = this.metadata.bones[this.selectedBoneIndex]!;
+      if (pos) {
+        const s = projectPoint(pos);
+        if (s) {
+          ctx.fillStyle = "#eab308";
+          ctx.beginPath();
+          ctx.arc(s[0], s[1], 6, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = "#facc15";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(s[0], s[1], 12, 0, Math.PI * 2);
+          ctx.stroke();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "bold 12px sans-serif";
+          ctx.shadowColor = "rgba(0,0,0,0.8)";
+          ctx.shadowBlur = 4;
+          ctx.fillText(
+            bone.nameLocal || `Bone ${this.selectedBoneIndex}`,
+            s[0] + 16,
+            s[1] + 4,
+          );
+          ctx.shadowBlur = 0;
+        }
+      }
+    }
+
+    // 4. Draw Model Bounds
+    if (this.debugBounds) {
+      const bounds = this.metadata.bounds;
+      const min = bounds.min;
+      const max = bounds.max;
+      const corners: [number, number, number][] = [
+        [min[0], min[1], min[2]],
+        [max[0], min[1], min[2]],
+        [min[0], max[1], min[2]],
+        [max[0], max[1], min[2]],
+        [min[0], min[1], max[2]],
+        [max[0], min[1], max[2]],
+        [min[0], max[1], max[2]],
+        [max[0], max[1], max[2]],
+      ];
+      const sCorners = corners.map(projectPoint);
+
+      const edges = [
+        [0, 1],
+        [1, 3],
+        [3, 2],
+        [2, 0],
+        [4, 5],
+        [5, 7],
+        [7, 6],
+        [6, 4],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
+      ];
+
+      ctx.strokeStyle = "rgba(6, 182, 212, 0.75)";
+      ctx.lineWidth = 2;
+      for (const [e1, e2] of edges) {
+        const c1 = sCorners[e1];
+        const c2 = sCorners[e2];
+        if (c1 && c2) {
+          ctx.beginPath();
+          ctx.moveTo(c1[0], c1[1]);
+          ctx.lineTo(c2[0], c2[1]);
+          ctx.stroke();
+        }
+      }
+    }
+
+    ctx.restore();
+  };
 
   private handleMorphChange = (e: Event) => {
     const { index, weight } = (e as CustomEvent).detail;
@@ -920,7 +1174,7 @@ export class WebMmdAppShell extends LitElement {
       <header>
         <div class="brand">
           <div class="logo">WebMMD</div>
-          <div class="version-tag">0.1.1</div>
+          <div class="version-tag">0.1.2</div>
         </div>
         <div class="controls">
           <input
@@ -1033,6 +1287,10 @@ export class WebMmdAppShell extends LitElement {
             id="gpu-canvas"
             class=${this.metadata ? "active" : ""}
           ></canvas>
+          <canvas
+            id="debug-canvas"
+            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none;"
+          ></canvas>
 
           ${
             this.parseError
@@ -1082,7 +1340,10 @@ export class WebMmdAppShell extends LitElement {
         <div class="sidebar ${this.sidebarOpen ? "" : "closed"}">
           <webmmd-inspector
             .metadata=${this.metadata}
+            .viewer=${this.viewer}
             @morph-change=${this.handleMorphChange}
+            @debug-toggle=${this.handleDebugToggle}
+            @bone-select=${this.handleBoneSelect}
           >
           </webmmd-inspector>
         </div>

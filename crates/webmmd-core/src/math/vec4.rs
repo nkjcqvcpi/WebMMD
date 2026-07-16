@@ -25,7 +25,16 @@ impl Vec4 {
             x: self.x * factor,
             y: self.y * factor,
             z: self.z * factor,
-            w: self.w * factor, // Wait, syntax error: "pub" is not allowed inside a struct instantiation. Let me remove it.
+            w: self.w * factor,
+        }
+    }
+
+    pub fn add(self, other: Self) -> Self {
+        Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
+            w: self.w + other.w,
         }
     }
 }

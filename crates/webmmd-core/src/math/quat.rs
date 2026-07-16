@@ -133,4 +133,43 @@ impl Quat {
             w: s0 * self.w + s1 * other.w,
         }
     }
+
+    pub fn to_euler_xyz(self) -> Vec3 {
+        let q = self;
+        let siny = 2.0 * (q.x * q.z + q.y * q.w);
+        let y = if siny.abs() >= 1.0 {
+            (std::f32::consts::PI / 2.0).copysign(siny)
+        } else {
+            siny.asin()
+        };
+
+        let x = (-2.0 * (q.y * q.z - q.x * q.w)).atan2(1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+        let z = (-2.0 * (q.x * q.y - q.z * q.w)).atan2(1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+
+        Vec3::new(x, y, z)
+    }
+
+    pub fn from_euler_xyz(x: f32, y: f32, z: f32) -> Self {
+        let cx = (x * 0.5).cos();
+        let sx = (x * 0.5).sin();
+        let cy = (y * 0.5).cos();
+        let sy = (y * 0.5).sin();
+        let cz = (z * 0.5).cos();
+        let sz = (z * 0.5).sin();
+
+        let qx = Self::new(sx, 0.0, 0.0, cx);
+        let qy = Self::new(0.0, sy, 0.0, cy);
+        let qz = Self::new(0.0, 0.0, sz, cz);
+
+        qx.mul(qy).mul(qz)
+    }
+
+    pub fn inverse(self) -> Self {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
+    }
 }

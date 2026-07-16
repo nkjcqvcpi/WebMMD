@@ -4,6 +4,26 @@ import { WebGpuRenderer, ModelData, ModelRenderRange } from "@webmmd/webgpu";
 import { OrbitCamera } from "./camera.js";
 import type { WasmModelMetadata } from "@webmmd/protocol";
 
+export interface IWasmModelRuntime {
+  evaluate(): void;
+  get_skin_matrices_view(): Float32Array;
+  get_material_states_view(): Float32Array;
+  get_morph_weights_view(): Float32Array;
+  set_morph_weight(index: number, weight: number): void;
+  set_bone_pose(
+    index: number,
+    tx: number,
+    ty: number,
+    tz: number,
+    qx: number,
+    qy: number,
+    qz: number,
+    qw: number,
+  ): void;
+  reset_pose(): void;
+  free(): void;
+}
+
 export class WebMmdViewer {
   private canvas: HTMLCanvasElement;
   private renderer: WebGpuRenderer;
@@ -17,8 +37,8 @@ export class WebMmdViewer {
 
   // Active Model State
   private activeMetadata: WasmModelMetadata | null = null;
-  private activeBonesBuffer: Float32Array | null = null;
   private morphWeights: Map<number, number> = new Map(); // morphIndex -> weight (0..1)
+  private modelRuntime: IWasmModelRuntime | null = null;
 
   // VFS for texture loading
   private vfs: Map<string, File> = new Map();
@@ -91,7 +111,12 @@ export class WebMmdViewer {
     vertexMorphOffsets: ArrayBuffer,
     uvMorphOffsets: ArrayBuffer,
     _additionalUvs: ArrayBuffer,
+    runtime: IWasmModelRuntime,
   ) {
+    if (this.modelRuntime) {
+      this.modelRuntime.free();
+    }
+    this.modelRuntime = runtime;
     this.activeMetadata = metadata;
     this.morphWeights.clear();
     this.camera.frameModel(metadata.bounds);
@@ -179,20 +204,17 @@ export class WebMmdViewer {
       indexCount: indices.byteLength / 4,
       ranges,
       textureBitmaps: bitmaps,
+      vertexMorphMeta: metadata.vertexMorphMeta,
+      uvMorphMeta: metadata.uvMorphMeta,
+      numMorphs: metadata.morphs.length,
     };
 
     await this.renderer.setModel(modelData);
 
-    // Initialize bone matrices array (wasm target)
-    this.activeBonesBuffer = new Float32Array(metadata.bones.length * 16);
-    // Fill with identity matrices
-    for (let i = 0; i < metadata.bones.length; i++) {
-      this.activeBonesBuffer[i * 16] = 1.0;
-      this.activeBonesBuffer[i * 16 + 5] = 1.0;
-      this.activeBonesBuffer[i * 16 + 10] = 1.0;
-      this.activeBonesBuffer[i * 16 + 15] = 1.0;
-    }
-    this.renderer.updateBones(this.activeBonesBuffer);
+    // Initial evaluation
+    this.modelRuntime.evaluate();
+    const skinMatrices = this.modelRuntime.get_skin_matrices_view();
+    this.renderer.updateBones(skinMatrices);
 
     this.markDirty();
   }
@@ -242,46 +264,38 @@ export class WebMmdViewer {
 
   public setMorphWeight(index: number, weight: number) {
     this.morphWeights.set(index, weight);
+    if (this.modelRuntime) {
+      this.modelRuntime.set_morph_weight(index, weight);
+    }
     this.markDirty();
   }
 
-  public setBonePose(index: number, matrix: Float32Array) {
-    if (
-      this.activeBonesBuffer &&
-      index >= 0 &&
-      index < this.activeMetadata!.bones.length
-    ) {
-      this.activeBonesBuffer.set(matrix, index * 16);
-      this.renderer.updateBones(this.activeBonesBuffer);
+  public setBonePose(
+    index: number,
+    tx: number,
+    ty: number,
+    tz: number,
+    qx: number,
+    qy: number,
+    qz: number,
+    qw: number,
+  ) {
+    if (this.modelRuntime) {
+      this.modelRuntime.set_bone_pose(index, tx, ty, tz, qx, qy, qz, qw);
       this.markDirty();
     }
   }
 
   public resetPose() {
-    if (this.activeBonesBuffer && this.activeMetadata) {
-      for (let i = 0; i < this.activeMetadata.bones.length; i++) {
-        this.activeBonesBuffer[i * 16] = 1.0;
-        this.activeBonesBuffer[i * 16 + 1] = 0.0;
-        this.activeBonesBuffer[i * 16 + 2] = 0.0;
-        this.activeBonesBuffer[i * 16 + 3] = 0.0;
-        this.activeBonesBuffer[i * 16 + 4] = 0.0;
-        this.activeBonesBuffer[i * 16 + 5] = 1.0;
-        this.activeBonesBuffer[i * 16 + 6] = 0.0;
-        this.activeBonesBuffer[i * 16 + 7] = 0.0;
-        this.activeBonesBuffer[i * 16 + 8] = 0.0;
-        this.activeBonesBuffer[i * 16 + 9] = 0.0;
-        this.activeBonesBuffer[i * 16 + 10] = 1.0;
-        this.activeBonesBuffer[i * 16 + 11] = 0.0;
-        this.activeBonesBuffer[i * 16 + 12] = 0.0;
-        this.activeBonesBuffer[i * 16 + 13] = 0.0;
-        this.activeBonesBuffer[i * 16 + 14] = 0.0;
-        this.activeBonesBuffer[i * 16 + 15] = 1.0;
-      }
-      this.renderer.updateBones(this.activeBonesBuffer);
-      this.morphWeights.clear();
-      this.camera.reset();
-      this.markDirty();
+    this.morphWeights.clear();
+    if (this.modelRuntime) {
+      this.modelRuntime.reset_pose();
+      this.modelRuntime.evaluate();
+      const skinMatrices = this.modelRuntime.get_skin_matrices_view();
+      this.renderer.updateBones(skinMatrices);
     }
+    this.camera.reset();
+    this.markDirty();
   }
 
   public resetCamera() {
@@ -332,56 +346,21 @@ export class WebMmdViewer {
       this.camera.getMatrices(aspect);
     this.renderer.updateCamera(viewProjection, view, eyePosition);
 
-    // 2. Prepare active compute morph parameters
-    const activeComputeMorphs: {
-      type: "vertex" | "uv";
-      start: number;
-      count: number;
-      weight: number;
-      channel: number;
-    }[] = [];
+    // 1. Evaluate skeletal and morph runtime
+    if (this.modelRuntime) {
+      this.modelRuntime.evaluate();
 
-    // Find active vertex & UV morphs
-    for (const [idx, weight] of this.morphWeights.entries()) {
-      if (weight <= 0.0) continue;
+      const skinMatrices = this.modelRuntime.get_skin_matrices_view();
+      this.renderer.updateBones(skinMatrices);
 
-      const vertexMeta = this.activeMetadata.vertexMorphMeta.find(
-        (m) => m.morphIndex === idx,
-      );
-      if (vertexMeta) {
-        activeComputeMorphs.push({
-          type: "vertex",
-          start: vertexMeta.offsetStart,
-          count: vertexMeta.offsetCount,
-          weight,
-          channel: 0,
-        });
-      }
+      const materialStates = this.modelRuntime.get_material_states_view();
+      this.renderer.updateMaterials(materialStates);
 
-      const uvMeta = this.activeMetadata.uvMorphMeta.find(
-        (m) => m.morphIndex === idx,
-      );
-      if (uvMeta) {
-        const morphMeta = this.activeMetadata.morphs[idx];
-        const channel =
-          morphMeta && morphMeta.morphType >= 3 && morphMeta.morphType <= 7
-            ? morphMeta.morphType - 3
-            : 0;
-
-        activeComputeMorphs.push({
-          type: "uv",
-          start: uvMeta.offsetStart,
-          count: uvMeta.offsetCount,
-          weight,
-          channel,
-        });
-      }
+      const morphWeights = this.modelRuntime.get_morph_weights_view();
+      this.renderer.computeDeform(morphWeights);
     }
 
-    // 3. Dispatch skinning & morph compute shader
-    this.renderer.computeDeform(activeComputeMorphs);
-
-    // 4. Render main pass
+    // 2. Render main pass
     this.renderer.draw();
 
     if ((window as any).__webmmdTest) {
@@ -399,6 +378,22 @@ export class WebMmdViewer {
       }
     }
     this.resizeObserver?.disconnect();
+    if (this.modelRuntime) {
+      this.modelRuntime.free();
+      this.modelRuntime = null;
+    }
     this.renderer.dispose();
+  }
+
+  public getRuntime(): IWasmModelRuntime | null {
+    return this.modelRuntime;
+  }
+
+  public getMetadata(): WasmModelMetadata | null {
+    return this.activeMetadata;
+  }
+
+  public getCamera(): OrbitCamera {
+    return this.camera;
   }
 }

@@ -21,6 +21,8 @@ export interface WasmBoneMeta {
   parentIndex: number;
   transformLayer: number;
   flags: number;
+  ikTargetIndex?: number;
+  ikLinkIndices?: number[];
 }
 
 export interface WasmMorphMeta {

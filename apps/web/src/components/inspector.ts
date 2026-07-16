@@ -7,7 +7,15 @@ import type { WasmModelMetadata } from "@webmmd/protocol";
 @customElement("webmmd-inspector")
 export class WebMmdInspector extends LitElement {
   @property({ type: Object }) metadata: WasmModelMetadata | null = null;
+  @property({ type: Object }) viewer: any | null = null;
   @state() private activeTab: string = "summary";
+
+  @state() private debugSkeleton = false;
+  @state() private debugIkTarget = false;
+  @state() private debugIkLinks = false;
+  @state() private debugBounds = false;
+
+  private updateLoopId: number | null = null;
 
   static styles = css`
     :host {
@@ -241,7 +249,67 @@ export class WebMmdInspector extends LitElement {
       margin-bottom: 16px;
       color: #334155;
     }
+
+    /* Style for checkbox custom toggles */
+    .checkbox-toggle {
+      width: 18px;
+      height: 18px;
+      accent-color: #818cf8;
+      cursor: pointer;
+    }
   `;
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.startUpdateLoop();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.stopUpdateLoop();
+  }
+
+  private startUpdateLoop() {
+    const tick = () => {
+      if (this.activeTab === "bones" || this.activeTab === "morphs") {
+        this.requestUpdate();
+      }
+      this.updateLoopId = requestAnimationFrame(tick);
+    };
+    this.updateLoopId = requestAnimationFrame(tick);
+  }
+
+  private stopUpdateLoop() {
+    if (this.updateLoopId !== null) {
+      cancelAnimationFrame(this.updateLoopId);
+      this.updateLoopId = null;
+    }
+  }
+
+  private dispatchDebugToggle(flag: string, value: boolean) {
+    if (flag === "skeleton") this.debugSkeleton = value;
+    if (flag === "ikTarget") this.debugIkTarget = value;
+    if (flag === "ikLinks") this.debugIkLinks = value;
+    if (flag === "bounds") this.debugBounds = value;
+
+    this.dispatchEvent(
+      new CustomEvent("debug-toggle", {
+        detail: { flag, value },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private selectBone(index: number) {
+    this.dispatchEvent(
+      new CustomEvent("bone-select", {
+        detail: { index },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
 
   render() {
     if (!this.metadata) {
@@ -313,6 +381,12 @@ export class WebMmdInspector extends LitElement {
           @click=${() => (this.activeTab = "diagnostics")}
         >
           Diagnostics <span class="count-badge">${diagnostics.length}</span>
+        </div>
+        <div
+          class="tab ${this.activeTab === "debug" ? "active" : ""}"
+          @click=${() => (this.activeTab = "debug")}
+        >
+          Debug
         </div>
       </div>
 
@@ -395,23 +469,79 @@ export class WebMmdInspector extends LitElement {
           this.activeTab === "bones"
             ? html`
                 <h2>Bones</h2>
-                ${bones.map(
-                  (b, index) => html`
-                    <div class="list-item">
-                      <div>
-                        <div class="item-name">
-                          ${b.nameLocal || "Unnamed Bone"}
+                ${bones.map((b, index) => {
+                  const runtime = this.viewer?.getRuntime();
+                  const hasIk =
+                    b.ikTargetIndex !== undefined && b.ikTargetIndex >= 0;
+                  const hasGrant = (b.flags & 0x0300) !== 0;
+
+                  let localTransStr = "N/A";
+                  let localRotStr = "N/A";
+                  let worldPosStr = "N/A";
+
+                  if (runtime) {
+                    const t = runtime.get_bone_local_translation(index);
+                    const r = runtime.get_bone_local_rotation(index);
+                    const m = runtime.get_bone_world_matrix(index);
+
+                    if (t)
+                      localTransStr = `[${t[0].toFixed(2)}, ${t[1].toFixed(2)}, ${t[2].toFixed(2)}]`;
+                    if (r)
+                      localRotStr = `[${r[0].toFixed(2)}, ${r[1].toFixed(2)}, ${r[2].toFixed(2)}, ${r[3].toFixed(2)}]`;
+                    if (m)
+                      worldPosStr = `[${m[12].toFixed(2)}, ${m[13].toFixed(2)}, ${m[14].toFixed(2)}]`;
+                  }
+
+                  return html`
+                    <div
+                      class="list-item"
+                      style="flex-direction: column; align-items: stretch; gap: 6px; cursor: pointer;"
+                      @click=${() => this.selectBone(index)}
+                    >
+                      <div
+                        style="display: flex; justify-content: space-between; align-items: center;"
+                      >
+                        <div>
+                          <div class="item-name">
+                            ${b.nameLocal || "Unnamed Bone"}
+                          </div>
+                          <div class="item-name-sub">${b.nameUniversal}</div>
                         </div>
-                        <div class="item-name-sub">
-                          layer: ${b.transformLayer} | parent: ${b.parentIndex}
-                        </div>
+                        <div class="item-detail">Idx: ${index}</div>
                       </div>
-                      <div class="item-detail">
-                        flags: 0x${b.flags.toString(16).toUpperCase()}
+                      <div
+                        style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #94a3b8; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px;"
+                      >
+                        <div>
+                          <strong>Parent:</strong>
+                          ${
+                            b.parentIndex >= 0
+                              ? `${bones[b.parentIndex]?.nameLocal || "Bone"} (${b.parentIndex})`
+                              : "None"
+                          }
+                        </div>
+                        <div><strong>Layer:</strong> ${b.transformLayer}</div>
+                        <div>
+                          <strong>IK State:</strong>
+                          ${hasIk ? `Active (Target: ${b.ikTargetIndex})` : "Inactive"}
+                        </div>
+                        <div>
+                          <strong>Grant State:</strong>
+                          ${hasGrant ? "Active" : "None"}
+                        </div>
+                        <div style="grid-column: span 2;">
+                          <strong>Local T:</strong> ${localTransStr}
+                        </div>
+                        <div style="grid-column: span 2;">
+                          <strong>Local R:</strong> ${localRotStr}
+                        </div>
+                        <div style="grid-column: span 2; color: #818cf8;">
+                          <strong>World P:</strong> ${worldPosStr}
+                        </div>
                       </div>
                     </div>
-                  `,
-                )}
+                  `;
+                })}
               `
             : ""
         }
@@ -419,8 +549,37 @@ export class WebMmdInspector extends LitElement {
           this.activeTab === "morphs"
             ? html`
                 <h2>Morphs</h2>
-                ${morphs.map(
-                  (m, index) => html`
+                ${morphs.map((m, index) => {
+                  const runtime = this.viewer?.getRuntime();
+                  let effectiveWeight = 0;
+                  let directWeight = 0;
+                  let groupWeight = 0;
+
+                  if (runtime) {
+                    effectiveWeight = runtime.get_morph_weight(index);
+                    directWeight = runtime.get_input_morph_weight(index);
+                    groupWeight = Math.max(0, effectiveWeight - directWeight);
+                  }
+
+                  const typeName =
+                    [
+                      "Group",
+                      "Vertex",
+                      "Bone",
+                      "UV",
+                      "AddUV1",
+                      "AddUV2",
+                      "AddUV3",
+                      "AddUV4",
+                      "Material",
+                      "Flip",
+                      "Impulse",
+                    ][m.morphType] || "Unknown";
+                  const panelName =
+                    ["System", "Eye", "Mouth", "Brow", "Other"][m.panel] ||
+                    "Other";
+
+                  return html`
                     <div
                       class="list-item"
                       style="flex-direction: column; align-items: stretch; gap: 8px;"
@@ -434,8 +593,28 @@ export class WebMmdInspector extends LitElement {
                           </div>
                           <div class="item-name-sub">${m.nameUniversal}</div>
                         </div>
-                        <div class="item-detail">type: ${m.morphType}</div>
+                        <div class="item-detail">${typeName}</div>
                       </div>
+
+                      <div
+                        style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #94a3b8; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px;"
+                      >
+                        <div><strong>Panel:</strong> ${panelName}</div>
+                        <div><strong>Status:</strong> Evaluated</div>
+                        <div>
+                          <strong>Direct W:</strong> ${directWeight.toFixed(2)}
+                        </div>
+                        <div>
+                          <strong>Group W:</strong> ${groupWeight.toFixed(2)}
+                        </div>
+                        <div
+                          style="grid-column: span 2; color: #818cf8; font-weight: bold;"
+                        >
+                          <strong>Effective W:</strong>
+                          ${effectiveWeight.toFixed(2)}
+                        </div>
+                      </div>
+
                       <!-- Interactive Morph Slider -->
                       <div
                         style="display: flex; align-items: center; gap: 12px; margin-top: 4px;"
@@ -445,18 +624,19 @@ export class WebMmdInspector extends LitElement {
                           min="0"
                           max="1"
                           step="0.01"
-                          value="0"
+                          .value=${directWeight.toString()}
                           @input=${(e: Event) => this.handleMorphChange(index, e)}
                           style="flex: 1; accent-color: #818cf8; cursor: pointer; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px;"
                         />
                         <span
                           style="font-family: monospace; font-size: 12px; color: #818cf8; min-width: 32px; text-align: right;"
-                          >0.00</span
                         >
+                          ${directWeight.toFixed(2)}
+                        </span>
                       </div>
                     </div>
-                  `,
-                )}
+                  `;
+                })}
               `
             : ""
         }
@@ -466,7 +646,13 @@ export class WebMmdInspector extends LitElement {
                 <h2>Physics Structural Data</h2>
 
                 <h3>Rigid Bodies (${rigidBodies.length})</h3>
-                ${rigidBodies.length === 0 ? html`<p style="color: #64748b; font-size: 13px;">No rigid bodies parsed.</p>` : ""}
+                ${
+                  rigidBodies.length === 0
+                    ? html`<p style="color: #64748b; font-size: 13px;">
+                        No rigid bodies parsed.
+                      </p>`
+                    : ""
+                }
                 ${rigidBodies.map(
                   (rb) => html`
                     <div class="list-item">
@@ -482,7 +668,13 @@ export class WebMmdInspector extends LitElement {
                 )}
 
                 <h3>Joints (${joints.length})</h3>
-                ${joints.length === 0 ? html`<p style="color: #64748b; font-size: 13px;">No joints parsed.</p>` : ""}
+                ${
+                  joints.length === 0
+                    ? html`<p style="color: #64748b; font-size: 13px;">
+                        No joints parsed.
+                      </p>`
+                    : ""
+                }
                 ${joints.map(
                   (j) => html`
                     <div class="list-item">
@@ -500,7 +692,13 @@ export class WebMmdInspector extends LitElement {
                 )}
 
                 <h3>Soft Bodies (${softBodies.length})</h3>
-                ${softBodies.length === 0 ? html`<p style="color: #64748b; font-size: 13px;">No soft bodies parsed.</p>` : ""}
+                ${
+                  softBodies.length === 0
+                    ? html`<p style="color: #64748b; font-size: 13px;">
+                        No soft bodies parsed.
+                      </p>`
+                    : ""
+                }
                 ${softBodies.map(
                   (sb) => html`
                     <div class="list-item">
@@ -543,11 +741,62 @@ export class WebMmdInspector extends LitElement {
                       </div>
                       <div class="diag-msg">${diag.message}</div>
                       <div class="diag-meta">
-                        ${diag.itemIndex !== undefined ? `Item Index: ${diag.itemIndex}` : ""}
+                        ${
+                          diag.itemIndex !== undefined
+                            ? `Item Index: ${diag.itemIndex}`
+                            : ""
+                        }
                       </div>
                     </div>
                   `,
                 )}
+              `
+            : ""
+        }
+        ${
+          this.activeTab === "debug"
+            ? html`
+                <h2>Debug Overlay Options</h2>
+                <div
+                  class="meta-grid"
+                  style="grid-template-columns: 1fr auto; align-items: center; gap: 16px;"
+                >
+                  <div class="label">Show Skeleton Lines</div>
+                  <input
+                    type="checkbox"
+                    class="checkbox-toggle"
+                    ?checked=${this.debugSkeleton}
+                    @change=${(e: any) =>
+                      this.dispatchDebugToggle("skeleton", e.target.checked)}
+                  />
+
+                  <div class="label">Show IK Targets</div>
+                  <input
+                    type="checkbox"
+                    class="checkbox-toggle"
+                    ?checked=${this.debugIkTarget}
+                    @change=${(e: any) =>
+                      this.dispatchDebugToggle("ikTarget", e.target.checked)}
+                  />
+
+                  <div class="label">Show IK Links</div>
+                  <input
+                    type="checkbox"
+                    class="checkbox-toggle"
+                    ?checked=${this.debugIkLinks}
+                    @change=${(e: any) =>
+                      this.dispatchDebugToggle("ikLinks", e.target.checked)}
+                  />
+
+                  <div class="label">Show Model Bounds</div>
+                  <input
+                    type="checkbox"
+                    class="checkbox-toggle"
+                    ?checked=${this.debugBounds}
+                    @change=${(e: any) =>
+                      this.dispatchDebugToggle("bounds", e.target.checked)}
+                  />
+                </div>
               `
             : ""
         }
