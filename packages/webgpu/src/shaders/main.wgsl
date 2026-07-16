@@ -7,29 +7,37 @@ struct CameraUniforms {
   padding: f32,
 };
 
-struct Material {
+struct StaticMaterial {
+  texture_indices: vec4<i32>, // base, sphere, toon, render_class
+  flags_modes: vec4<u32>,     // flags, sphere_mode, toon_mode, padding
+};
+
+struct DynamicMaterial {
   diffuse: vec4<f32>,
   ambient_shininess: vec4<f32>, // ambient (12 bytes) + shininess (4 bytes)
-  specular: vec4<f32>, // specular (12 bytes) + padding (4 bytes)
+  specular: vec4<f32>,          // specular (12 bytes) + padding (4 bytes)
   edge_color: vec4<f32>,
-  edge_parameters: vec4<f32>, // edge_size, padding
-  texture_indices: vec4<i32>, // base, sphere, toon, padding
-  material_flags: vec4<u32>, // flags, sphere_mode, toon_mode, padding
+  edge_parameters: vec4<f32>,   // edge_size, padding x 3
+  texture_tint: vec4<f32>,
+  sphere_tint: vec4<f32>,
+  toon_tint: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
-@group(1) @binding(0) var<storage, read> materials: array<Material>;
+@group(1) @binding(0) var<storage, read> static_materials: array<StaticMaterial>;
 @group(1) @binding(1) var base_texture: texture_2d<f32>;
 @group(1) @binding(2) var base_sampler: sampler;
 @group(1) @binding(3) var sphere_texture: texture_2d<f32>;
 @group(1) @binding(4) var sphere_sampler: sampler;
 @group(1) @binding(5) var toon_texture: texture_2d<f32>;
 @group(1) @binding(6) var toon_sampler: sampler;
+@group(1) @binding(7) var<storage, read> dynamic_materials: array<DynamicMaterial>;
 
 struct VertexInput {
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
+  @location(3) edge_scale: f32,
   @builtin(instance_index) instance_idx: u32,
 };
 
@@ -75,11 +83,13 @@ fn vs_outline(
   output.uv = input.uv;
   output.normal = normalize(input.normal);
 
-  let material = materials[mat_idx];
-  let edge_size = material.edge_parameters.x;
+  let dyn_mat = dynamic_materials[mat_idx];
+  let edge_size = dyn_mat.edge_parameters.x;
+  let edge_scale = input.edge_scale;
+  let globalOutlineScale = 0.01;
 
   // Extrude vertex along normal in object space
-  let extruded_pos = input.position + output.normal * (edge_size * 0.01);
+  let extruded_pos = input.position + output.normal * (edge_size * edge_scale * globalOutlineScale);
   let world_pos = vec4<f32>(extruded_pos, 1.0);
 
   output.world_position = world_pos.xyz;
@@ -92,24 +102,30 @@ fn vs_outline(
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let mat_idx = input.material_idx;
-  let material = materials[mat_idx];
+  let stat_mat = static_materials[mat_idx];
+  let dyn_mat = dynamic_materials[mat_idx];
 
   // Base texture
-  var color = material.diffuse;
-  let has_base_tex = material.texture_indices.x >= 0;
+  var color = dyn_mat.diffuse;
+  let has_base_tex = stat_mat.texture_indices.x >= 0;
   if (has_base_tex) {
     let tex_color = textureSample(base_texture, base_sampler, input.uv);
-    color *= tex_color;
+    color *= tex_color * dyn_mat.texture_tint;
   }
 
-  // Early alpha discard
-  if (color.a < 0.05) {
+  // Alpha discard classification check
+  let render_class = stat_mat.texture_indices.w;
+  if (render_class == 1) { // Alpha Cutout
+    if (color.a < 0.5) {
+      discard;
+    }
+  } else if (color.a < 0.05) { // Opaque / Blend basic discard
     discard;
   }
 
   // Toon lighting
-  let toon_mode = i32(material.material_flags.z);
-  let has_toon = material.texture_indices.z >= 0;
+  let toon_mode = i32(stat_mat.flags_modes.z);
+  let has_toon = stat_mat.texture_indices.z >= 0;
   
   var lighting = vec3<f32>(1.0);
   
@@ -118,13 +134,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let ndotl = dot(normalize(input.normal), light_dir);
     let toon_uv = vec2<f32>(0.5, clamp(ndotl * 0.5 + 0.5, 0.0, 1.0));
     let toon_color = textureSample(toon_texture, toon_sampler, toon_uv).rgb;
-    lighting = toon_color;
+    lighting = toon_color * dyn_mat.toon_tint.rgb;
   } else if (toon_mode == 1) { // Shared toon
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.5));
     let ndotl = dot(normalize(input.normal), light_dir);
     let toon_uv = vec2<f32>(0.5, clamp(ndotl * 0.5 + 0.5, 0.0, 1.0));
     let toon_color = textureSample(toon_texture, toon_sampler, toon_uv).rgb;
-    lighting = toon_color;
+    lighting = toon_color * dyn_mat.toon_tint.rgb;
   } else {
     // Basic diffuse shading fallback
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.5));
@@ -132,11 +148,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     lighting = vec3<f32>(ndotl * 0.6 + 0.4);
   }
 
-  var final_rgb = color.rgb * (0.4 * material.ambient_shininess.rgb + 0.8 * lighting);
+  var final_rgb = color.rgb * (0.4 * dyn_mat.ambient_shininess.rgb + 0.8 * lighting);
 
   // Sphere map
-  let sphere_mode = i32(material.material_flags.y);
-  let has_sphere = material.texture_indices.y >= 0;
+  let sphere_mode = i32(stat_mat.flags_modes.y);
+  let has_sphere = stat_mat.texture_indices.y >= 0;
   if (has_sphere && sphere_mode > 0) {
     // Generate view-space projected normal coordinates
     let sphere_uv = vec2<f32>(
@@ -144,10 +160,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       -input.view_normal.y * 0.5 + 0.5
     );
     let sphere_color = textureSample(sphere_texture, sphere_sampler, sphere_uv);
+    let sphere_val = sphere_color.rgb * dyn_mat.sphere_tint.rgb;
     if (sphere_mode == 1) { // Multiply
-      final_rgb *= sphere_color.rgb;
+      final_rgb *= sphere_val;
     } else if (sphere_mode == 2) { // Additive
-      final_rgb += sphere_color.rgb * color.a; // Scale by alpha for transparency support
+      final_rgb += sphere_val * color.a; // Scale by alpha for transparency support
     }
   }
 
@@ -157,16 +174,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 @fragment
 fn fs_outline(input: VertexOutput) -> @location(0) vec4<f32> {
   let mat_idx = input.material_idx;
-  let material = materials[mat_idx];
+  let stat_mat = static_materials[mat_idx];
+  let dyn_mat = dynamic_materials[mat_idx];
 
   // Alpha discard check if base texture is transparent
-  var alpha = material.edge_color.a;
-  if (material.texture_indices.x >= 0) {
+  var alpha = dyn_mat.edge_color.a;
+  if (stat_mat.texture_indices.x >= 0) {
     let tex_color = textureSample(base_texture, base_sampler, input.uv);
     if (tex_color.a < 0.1) {
       discard;
     }
   }
 
-  return vec4<f32>(material.edge_color.rgb, alpha);
+  return vec4<f32>(dyn_mat.edge_color.rgb, alpha);
 }

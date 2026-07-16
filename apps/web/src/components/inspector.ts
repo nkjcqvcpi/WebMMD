@@ -561,6 +561,8 @@ export class WebMmdInspector extends LitElement {
                     groupWeight = Math.max(0, effectiveWeight - directWeight);
                   }
 
+                  const isUnsupportedUv = m.morphType >= 4 && m.morphType <= 7;
+
                   const typeName =
                     [
                       "Group",
@@ -582,7 +584,7 @@ export class WebMmdInspector extends LitElement {
                   return html`
                     <div
                       class="list-item"
-                      style="flex-direction: column; align-items: stretch; gap: 8px;"
+                      style="flex-direction: column; align-items: stretch; gap: 8px; ${isUnsupportedUv ? "opacity: 0.6;" : ""}"
                     >
                       <div
                         style="display: flex; justify-content: space-between; align-items: center;"
@@ -600,7 +602,10 @@ export class WebMmdInspector extends LitElement {
                         style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 11px; color: #94a3b8; background: rgba(0,0,0,0.15); padding: 8px; border-radius: 6px;"
                       >
                         <div><strong>Panel:</strong> ${panelName}</div>
-                        <div><strong>Status:</strong> Evaluated</div>
+                        <div>
+                          <strong>Status:</strong>
+                          ${isUnsupportedUv ? "Parsed but not rendered" : "Evaluated"}
+                        </div>
                         <div>
                           <strong>Direct W:</strong> ${directWeight.toFixed(2)}
                         </div>
@@ -617,16 +622,17 @@ export class WebMmdInspector extends LitElement {
 
                       <!-- Interactive Morph Slider -->
                       <div
-                        style="display: flex; align-items: center; gap: 12px; margin-top: 4px;"
+                        style="display: flex; align-items: center; gap: 12px; margin-top: 4px; ${isUnsupportedUv ? "pointer-events: none;" : ""}"
                       >
                         <input
                           type="range"
                           min="0"
                           max="1"
                           step="0.01"
+                          ?disabled=${isUnsupportedUv}
                           .value=${directWeight.toString()}
                           @input=${(e: Event) => this.handleMorphChange(index, e)}
-                          style="flex: 1; accent-color: #818cf8; cursor: pointer; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px;"
+                          style="flex: 1; accent-color: #818cf8; cursor: ${isUnsupportedUv ? "default" : "pointer"}; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px;"
                         />
                         <span
                           style="font-family: monospace; font-size: 12px; color: #818cf8; min-width: 32px; text-align: right;"

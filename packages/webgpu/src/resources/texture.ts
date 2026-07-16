@@ -4,11 +4,12 @@ export async function createTextureFromImage(
   device: GPUDevice,
   bitmap: ImageBitmap,
   label: string,
+  format: GPUTextureFormat = "rgba8unorm-srgb",
 ): Promise<GPUTexture> {
   const texture = device.createTexture({
     label,
     size: [bitmap.width, bitmap.height, 1],
-    format: "rgba8unorm",
+    format,
     usage:
       GPUTextureUsage.TEXTURE_BINDING |
       GPUTextureUsage.COPY_DST |
@@ -31,7 +32,7 @@ export function createFallbackTexture(
   const texture = device.createTexture({
     label: "Fallback Texture",
     size: [2, 2, 1],
-    format: "rgba8unorm",
+    format: "rgba8unorm-srgb",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
@@ -95,7 +96,7 @@ export function createSharedToonTexture(
   const texture = device.createTexture({
     label: `Shared Toon Texture ${index + 1}`,
     size: [1, 2, 1],
-    format: "rgba8unorm",
+    format: "rgba8unorm-srgb",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 

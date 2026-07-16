@@ -27,6 +27,7 @@ struct RenderVertex {
   normal_z: f32,
   u: f32,
   v: f32,
+  edge_scale: f32,
 };
 
 struct VertexMorphContribution {
@@ -356,4 +357,5 @@ fn deform_vertices(@builtin(global_invocation_id) global_id: vec3<u32>) {
   output_vertices[idx].normal_z = norm.z;
   output_vertices[idx].u = morphed_uv.x;
   output_vertices[idx].v = morphed_uv.y;
+  output_vertices[idx].edge_scale = input.edge_scale;
 }

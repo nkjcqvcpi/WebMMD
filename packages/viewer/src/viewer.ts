@@ -40,6 +40,7 @@ export class WebMmdViewer {
   private activeMetadata: WasmModelMetadata | null = null;
   private morphWeights: Map<number, number> = new Map(); // morphIndex -> weight (0..1)
   private modelRuntime: IWasmModelRuntime | null = null;
+  private modelData: ModelData | null = null;
 
   // Recovery raw buffers
   private activeVertices: ArrayBuffer | null = null;
@@ -54,6 +55,7 @@ export class WebMmdViewer {
 
   // VFS for texture loading
   private vfs: Map<string, File> = new Map();
+  private textureAlphaInfos: (any | null)[] = [];
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -155,6 +157,10 @@ export class WebMmdViewer {
     console.log("[Viewer] Resolving textures...");
     const bitmaps = await this.resolveTextures(metadata.textures);
 
+    // Initial evaluation to get the starting material states
+    this.modelRuntime.evaluate();
+    const initialMaterialStates = this.modelRuntime.get_material_states_view();
+
     // 2. Prepare material ranges & modelData using helper
     const modelData = this.buildModelData(
       metadata,
@@ -164,12 +170,24 @@ export class WebMmdViewer {
       vertexMorphOffsets,
       uvMorphOffsets,
       bitmaps,
+      initialMaterialStates,
     );
+    this.modelData = modelData;
 
     await this.renderer.setModel(modelData);
 
-    // Initial evaluation
-    this.modelRuntime.evaluate();
+    // Release ImageBitmap memory ownership immediately
+    for (const bitmap of bitmaps) {
+      if (bitmap) {
+        try {
+          bitmap.close();
+        } catch (e) {
+          // ignore already closed
+        }
+      }
+    }
+    this.textureCache.clear();
+
     const skinMatrices = this.modelRuntime.get_skin_matrices_view();
     this.renderer.updateBones(skinMatrices);
 
@@ -184,7 +202,22 @@ export class WebMmdViewer {
     vertexMorphOffsets: ArrayBuffer,
     uvMorphOffsets: ArrayBuffer,
     bitmaps: (ImageBitmap | null)[],
+    initialMaterialStates: Float32Array,
   ): ModelData {
+    // Analyze texture alphas
+    const textureAlphaInfos: (any | null)[] = [];
+    for (let i = 0; i < bitmaps.length; i++) {
+      const bitmap = bitmaps[i];
+      if (bitmap) {
+        const path = metadata.textures[i] || "";
+        const info = this.analyzeTextureAlpha(bitmap, path);
+        textureAlphaInfos.push(info);
+      } else {
+        textureAlphaInfos.push(null);
+      }
+    }
+    this.textureAlphaInfos = textureAlphaInfos;
+
     let offset = 0;
     const ranges: ModelRenderRange[] = metadata.materials.map((m, matIdx) => {
       const firstIndex = offset;
@@ -201,46 +234,53 @@ export class WebMmdViewer {
         sphereTextureIndex: -1,
         toonTextureIndex: -1,
         transparent: false,
+        renderClass: "opaque",
         toonMode: 0,
       };
     });
 
-    // Assert material buffer size layout
-    const expectedMaterialSize = metadata.materials.length * 112;
+    // Assert material buffer size layout (static buffer size)
+    const expectedMaterialSize = metadata.materials.length * 32;
     if (materials.byteLength !== expectedMaterialSize) {
       throw new Error(
-        `Material buffer byteLength mismatch. Expected ${expectedMaterialSize} bytes (112 bytes per material), got ${materials.byteLength} bytes.`,
+        `Material buffer byteLength mismatch. Expected ${expectedMaterialSize} bytes (32 bytes per material), got ${materials.byteLength} bytes.`,
       );
     }
 
-    const floatView = new Float32Array(materials);
     const intView = new Int32Array(materials);
     const uintView = new Uint32Array(materials);
-    const STRIDE = 28; // 28 * 4 = 112 bytes
+    const STRIDE = 8; // 8 * 4 = 32 bytes
 
     for (let i = 0; i < ranges.length; i++) {
       const range = ranges[i]!;
       const offset = i * STRIDE;
 
-      const baseIdx = intView[offset + 20] ?? -1;
-      const sphereIdx = intView[offset + 21] ?? -1;
-      const toonIdx = intView[offset + 22] ?? -1;
-      const flags = uintView[offset + 24] ?? 0;
-      const diffuseAlpha = floatView[offset + 3] ?? 1.0;
-      const toonMode = uintView[offset + 26] ?? 0;
+      const baseIdx = intView[offset + 0] ?? -1;
+      const sphereIdx = intView[offset + 1] ?? -1;
+      const toonIdx = intView[offset + 2] ?? -1;
+      const flags = uintView[offset + 4] ?? 0;
+      const toonMode = uintView[offset + 6] ?? 0;
 
-      const texturePath = baseIdx >= 0 ? metadata.textures[baseIdx] : undefined;
-      const hasTextureAlpha = texturePath
-        ? texturePath.toLowerCase().endsWith(".png") ||
-          texturePath.toLowerCase().endsWith(".tga")
-        : false;
+      const stateOffset = i * 32;
+      const diffuseAlpha = initialMaterialStates[stateOffset + 3] ?? 1.0;
+
+      let renderClass: "opaque" | "cutout" | "blend" = "opaque";
+      if (diffuseAlpha < 0.99) {
+        renderClass = "blend";
+      } else if (baseIdx >= 0) {
+        const info = this.textureAlphaInfos[baseIdx];
+        if (info) {
+          renderClass = info.renderHint;
+        }
+      }
 
       range.textureIndex = baseIdx;
       range.sphereTextureIndex = sphereIdx;
       range.toonTextureIndex = toonIdx;
       range.doubleSided = (flags & 0x01) !== 0;
       range.castOutline = (flags & 0x10) !== 0;
-      range.transparent = diffuseAlpha < 0.99 || hasTextureAlpha;
+      range.transparent = renderClass === "blend";
+      range.renderClass = renderClass;
       range.toonMode = toonMode;
     }
 
@@ -258,6 +298,97 @@ export class WebMmdViewer {
       uvMorphMeta: metadata.uvMorphMeta,
       numMorphs: metadata.morphs.length,
     };
+  }
+
+  private analyzeTextureAlpha(bitmap: ImageBitmap, path: string): any {
+    const totalPixels = bitmap.width * bitmap.height;
+    const isOpaqueFormat = /\.(jpe?g|bmp)$/i.test(path);
+    if (isOpaqueFormat) {
+      return {
+        hasAlpha: false,
+        minAlpha: 255,
+        maxAlpha: 255,
+        transparentPixelCount: 0,
+        translucentPixelCount: 0,
+        opaquePixelCount: totalPixels,
+        renderHint: "opaque",
+      };
+    }
+
+    try {
+      let canvas: any;
+      if (typeof OffscreenCanvas !== "undefined") {
+        canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      } else {
+        canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("Failed to get 2D context");
+      }
+      ctx.drawImage(bitmap, 0, 0);
+      const imgData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+      const data = imgData.data;
+
+      let transparentPixelCount = 0;
+      let translucentPixelCount = 0;
+      let opaquePixelCount = 0;
+      let minAlpha = 255;
+      let maxAlpha = 0;
+
+      const translucentThreshold = Math.max(
+        10,
+        Math.floor(totalPixels * 0.0005),
+      );
+
+      for (let i = 3; i < data.length; i += 4) {
+        const alpha = data[i]!;
+        if (alpha < minAlpha) minAlpha = alpha;
+        if (alpha > maxAlpha) maxAlpha = alpha;
+
+        if (alpha < 5) {
+          transparentPixelCount++;
+        } else if (alpha < 250) {
+          translucentPixelCount++;
+          if (translucentPixelCount > translucentThreshold) {
+            break;
+          }
+        } else {
+          opaquePixelCount++;
+        }
+      }
+
+      let renderHint: "opaque" | "cutout" | "blend" = "opaque";
+      if (translucentPixelCount > translucentThreshold) {
+        renderHint = "blend";
+      } else if (transparentPixelCount > 0) {
+        renderHint = "cutout";
+      }
+
+      return {
+        hasAlpha: maxAlpha < 255 || minAlpha < 255,
+        minAlpha,
+        maxAlpha,
+        transparentPixelCount,
+        translucentPixelCount,
+        opaquePixelCount,
+        renderHint,
+      };
+    } catch (e) {
+      console.warn(`[Viewer] Failed to analyze texture alpha for ${path}:`, e);
+      const hasTextureAlpha = /\.(png|tga)$/i.test(path);
+      return {
+        hasAlpha: hasTextureAlpha,
+        minAlpha: 0,
+        maxAlpha: 255,
+        transparentPixelCount: 0,
+        translucentPixelCount: 0,
+        opaquePixelCount: totalPixels,
+        renderHint: hasTextureAlpha ? "blend" : "opaque",
+      };
+    }
   }
 
   private activePmxPath = "";
@@ -425,6 +556,7 @@ export class WebMmdViewer {
 
     // 2. Render main pass
     this.renderer.draw();
+    this.triggerChange();
 
     if ((window as any).__webmmdTest) {
       (window as any).__webmmdTest.frameRenderedCount++;
@@ -451,6 +583,17 @@ export class WebMmdViewer {
     }
     this.renderer.dispose();
     this.textureCache.clear();
+    this.camera.dispose();
+  }
+
+  private onChangeCallback: (() => void) | null = null;
+  public onChange(callback: () => void) {
+    this.onChangeCallback = callback;
+  }
+  private triggerChange() {
+    if (this.onChangeCallback) {
+      this.onChangeCallback();
+    }
   }
 
   public async readPixel(
@@ -459,6 +602,56 @@ export class WebMmdViewer {
   ): Promise<[number, number, number, number]> {
     this.markDirty();
     return this.renderer.readPixel(x, y);
+  }
+
+  public getMaterialClassCounts() {
+    let opaque = 0;
+    let cutout = 0;
+    let blend = 0;
+    if (this.modelData) {
+      for (const r of this.modelData.ranges) {
+        if (r.renderClass === "opaque") opaque++;
+        else if (r.renderClass === "cutout") cutout++;
+        else if (r.renderClass === "blend") blend++;
+      }
+    }
+    return { opaque, cutout, blend };
+  }
+
+  public getTextureAlphaStats() {
+    let opaque = 0;
+    let cutout = 0;
+    let blend = 0;
+    let failed = 0;
+    for (const info of this.textureAlphaInfos) {
+      if (info) {
+        if (info.renderHint === "opaque") opaque++;
+        else if (info.renderHint === "cutout") cutout++;
+        else if (info.renderHint === "blend") blend++;
+      } else {
+        failed++;
+      }
+    }
+    return { opaque, cutout, blend, failed };
+  }
+
+  public getTexturePaths(): string[] {
+    return this.activeMetadata?.textures || [];
+  }
+
+  public getUnresolvedTextureCount(): number {
+    let unresolved = 0;
+    if (this.activeMetadata) {
+      for (const path of this.activeMetadata.textures) {
+        const resolvedPath = this.activePmxPath
+          ? resolveRelativePath(this.activePmxPath, path)
+          : path.replace(/\\/g, "/").toLowerCase();
+        if (!this.lookupVfs(resolvedPath)) {
+          unresolved++;
+        }
+      }
+    }
+    return unresolved;
   }
 
   private handleVisibilityChange = () => {
@@ -517,7 +710,9 @@ export class WebMmdViewer {
             this.activeVertexMorphOffsets,
             this.activeUvMorphOffsets,
             bitmaps,
+            this.modelRuntime.get_material_states_view(),
           );
+          this.modelData = modelData;
 
           await this.renderer.setModel(modelData);
 

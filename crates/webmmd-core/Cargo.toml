@@ -1,6 +1,6 @@
 [package]
 name = "webmmd-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 authors = ["Google DeepMind Team"]
 license = "AGPL-3.0-or-later"

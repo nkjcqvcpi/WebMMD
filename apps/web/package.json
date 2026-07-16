@@ -1,6 +1,6 @@
 {
   "name": "web-app",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "description": "Lit-based MMD model viewer application for WebMMD",

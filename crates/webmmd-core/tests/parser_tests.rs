@@ -271,7 +271,7 @@ fn test_material_morph() {
     assert!((runtime.material_states[0].edge_size - 0.5).abs() < 1e-4);
 
     let states = runtime.get_material_states();
-    assert_eq!(states.len(), 28);
+    assert_eq!(states.len(), 32);
 }
 
 #[test]

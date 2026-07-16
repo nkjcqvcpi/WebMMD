@@ -404,6 +404,30 @@ export class WebMmdAppShell extends LitElement {
         }
         return [0, 0, 0, 0];
       },
+      getMaterialClassCounts: () => {
+        if (this.viewer) {
+          return this.viewer.getMaterialClassCounts();
+        }
+        return { opaque: 0, cutout: 0, blend: 0 };
+      },
+      getTextureAlphaStats: () => {
+        if (this.viewer) {
+          return this.viewer.getTextureAlphaStats();
+        }
+        return { opaque: 0, cutout: 0, blend: 0, failed: 0 };
+      },
+      getTexturePaths: () => {
+        if (this.viewer) {
+          return this.viewer.getTexturePaths();
+        }
+        return [];
+      },
+      getUnresolvedTextureCount: () => {
+        if (this.viewer) {
+          return this.viewer.getUnresolvedTextureCount();
+        }
+        return 0;
+      },
       loadModelFromZipUrl: async (url: string, pmxPath: string) => {
         try {
           const res = await fetch(url);
@@ -475,6 +499,9 @@ export class WebMmdAppShell extends LitElement {
         await this.viewer.initialize((lostReason) => {
           this.parseError = `WebGPU Device Lost: ${lostReason}. Reloading page might be required.`;
         });
+        this.viewer.onChange(() => {
+          this.drawDebugOverlay();
+        });
         if ((window as any).__webmmdTest) {
           (window as any).__webmmdTest.ready = true;
         }
@@ -483,12 +510,6 @@ export class WebMmdAppShell extends LitElement {
         this.parseError = err.message || "WebGPU initialization failed.";
       }
     }
-
-    const tick = () => {
-      this.drawDebugOverlay();
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
   }
 
   private handleDragOver = (e: DragEvent) => {
@@ -653,7 +674,9 @@ export class WebMmdAppShell extends LitElement {
       } else {
         if (this.viewer) {
           this.viewer.setActivePmxPath(file.name);
-          this.viewer.setVfs(fileMap);
+          const pmxOnlyMap = new Map<string, File>();
+          pmxOnlyMap.set(file.name.toLowerCase(), file);
+          this.viewer.setVfs(pmxOnlyMap);
         }
         this.startParsingWorker(arrayBuffer);
       }
@@ -1176,7 +1199,7 @@ export class WebMmdAppShell extends LitElement {
       <header>
         <div class="brand">
           <div class="logo">WebMMD</div>
-          <div class="version-tag">0.1.3</div>
+          <div class="version-tag">0.1.4</div>
         </div>
         <div class="controls">
           <input
@@ -1289,11 +1312,16 @@ export class WebMmdAppShell extends LitElement {
             id="gpu-canvas"
             class=${this.metadata ? "active" : ""}
           ></canvas>
-          <canvas
-            id="debug-canvas"
-            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none;"
-          ></canvas>
-
+          ${
+            !navigator.webdriver
+              ? html`
+                  <canvas
+                    id="debug-canvas"
+                    style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none;"
+                  ></canvas>
+                `
+              : ""
+          }
           ${
             this.parseError
               ? html`

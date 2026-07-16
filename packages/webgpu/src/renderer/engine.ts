@@ -24,6 +24,7 @@ export interface ModelRenderRange {
   sphereTextureIndex: number;
   toonTextureIndex: number;
   transparent: boolean;
+  renderClass: "opaque" | "cutout" | "blend";
   toonMode: number;
 }
 
@@ -61,12 +62,16 @@ export class WebGpuRenderer {
   // Global Resources
   private defaultTexture: GPUTexture | null = null;
   private defaultSampler: GPUSampler | null = null;
+  private baseSampler: GPUSampler | null = null;
+  private sphereSampler: GPUSampler | null = null;
+  private toonSampler: GPUSampler | null = null;
 
   // Active Model Buffers
   private verticesInputBuffer: GPUBuffer | null = null;
   private renderVertexBuffer: GPUBuffer | null = null;
   private indexBuffer: GPUBuffer | null = null;
-  private materialsBuffer: GPUBuffer | null = null;
+  private staticMaterialsBuffer: GPUBuffer | null = null;
+  private dynamicMaterialsBuffer: GPUBuffer | null = null;
   private boneMatricesBuffer: GPUBuffer | null = null;
   private vertexMorphAdjacencyBuffer: GPUBuffer | null = null;
   private vertexMorphContributionsBuffer: GPUBuffer | null = null;
@@ -118,6 +123,30 @@ export class WebGpuRenderer {
 
     this.defaultTexture = createFallbackTexture(device);
     this.defaultSampler = createFallbackSampler(device);
+
+    this.baseSampler = device.createSampler({
+      label: "Base Texture Sampler",
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "repeat",
+      addressModeV: "repeat",
+    });
+
+    this.sphereSampler = device.createSampler({
+      label: "Sphere Texture Sampler",
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+    });
+
+    this.toonSampler = device.createSampler({
+      label: "Toon Texture Sampler",
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+    });
 
     this.cameraUniformBuffer = createBuffer(
       device,
@@ -192,17 +221,31 @@ export class WebGpuRenderer {
       GPUBufferUsage.INDEX,
     );
 
-    this.materialsBuffer = createBufferWithData(
+    const staticView = new Int32Array(model.materials);
+    for (let i = 0; i < model.ranges.length; i++) {
+      const range = model.ranges[i]!;
+      const classIdx = ["opaque", "cutout", "blend"].indexOf(range.renderClass);
+      staticView[i * 8 + 3] = classIdx >= 0 ? classIdx : 0;
+    }
+
+    this.staticMaterialsBuffer = createBufferWithData(
       device,
-      "Materials Buffer",
+      "Static Materials Buffer",
       model.materials,
+      GPUBufferUsage.STORAGE,
+    );
+
+    this.dynamicMaterialsBuffer = createBuffer(
+      device,
+      "Dynamic Materials Buffer",
+      model.ranges.length * 128, // 128 bytes (32 floats) per material
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     );
 
     this.renderVertexBuffer = createBuffer(
       device,
       "Render Vertex Buffer",
-      model.vertexCount * 32, // Struct RenderVertex: pos(12) + normal_x/y/z(12) + u/v(8) = 32
+      model.vertexCount * 36, // Struct RenderVertex: pos(12) + normal_x/y/z(12) + u/v(8) + edge_scale(4) = 36
       GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE,
     );
 
@@ -436,13 +479,14 @@ export class WebGpuRenderer {
         label: `Material_${range.materialIndex}_BindGroup`,
         layout: this.renderPipelines.materialBindGroupLayout,
         entries: [
-          { binding: 0, resource: { buffer: this.materialsBuffer } },
+          { binding: 0, resource: { buffer: this.staticMaterialsBuffer! } },
           { binding: 1, resource: baseTex.createView() },
-          { binding: 2, resource: this.defaultSampler! },
+          { binding: 2, resource: this.baseSampler! },
           { binding: 3, resource: sphereTex.createView() },
-          { binding: 4, resource: this.defaultSampler! },
+          { binding: 4, resource: this.sphereSampler! },
           { binding: 5, resource: toonTex.createView() },
-          { binding: 6, resource: this.defaultSampler! },
+          { binding: 6, resource: this.toonSampler! },
+          { binding: 7, resource: { buffer: this.dynamicMaterialsBuffer! } },
         ],
       });
       this.materialBindGroups.push(bindGroup);
@@ -472,13 +516,15 @@ export class WebGpuRenderer {
   updateBones(matrices: Float32Array) {
     if (!this.context || !this.boneMatricesBuffer) return;
     const { device } = this.context;
-    device.queue.writeBuffer(this.boneMatricesBuffer, 0, matrices as any);
+    const copy = new Float32Array(matrices);
+    device.queue.writeBuffer(this.boneMatricesBuffer, 0, copy);
   }
 
   updateMaterials(materials: Float32Array) {
-    if (!this.context || !this.materialsBuffer) return;
+    if (!this.context || !this.dynamicMaterialsBuffer) return;
     const { device } = this.context;
-    device.queue.writeBuffer(this.materialsBuffer, 0, materials as any);
+    const copy = new Float32Array(materials);
+    device.queue.writeBuffer(this.dynamicMaterialsBuffer, 0, copy);
   }
 
   computeDeform(weights: Float32Array) {
@@ -491,7 +537,8 @@ export class WebGpuRenderer {
       return;
     const { device } = this.context;
 
-    device.queue.writeBuffer(this.activeMorphWeightsBuffer!, 0, weights as any);
+    const copy = new Float32Array(weights);
+    device.queue.writeBuffer(this.activeMorphWeightsBuffer!, 0, copy);
 
     const commandEncoder = device.createCommandEncoder({
       label: "Compute Deform Encoder",
@@ -549,21 +596,34 @@ export class WebGpuRenderer {
     renderPass.setIndexBuffer(this.indexBuffer, "uint32");
     renderPass.setBindGroup(0, this.cameraBindGroup);
 
-    // 1. Draw solid geometry
+    // 1. Draw inverted hull outline mesh (if enabled)
+    if (this.outlineEnabled) {
+      renderPass.setPipeline(this.renderPipelines.outline);
+      for (let i = 0; i < this.modelData.ranges.length; i++) {
+        const range = this.modelData.ranges[i]!;
+        if (!range.castOutline) continue;
+
+        const bindGroup = this.materialBindGroups[i]!;
+        renderPass.setBindGroup(1, bindGroup);
+        renderPass.drawIndexed(
+          range.indexCount,
+          1,
+          range.firstIndex,
+          0,
+          range.materialIndex,
+        );
+      }
+    }
+
+    // 2. Draw Opaque & Cutout materials
     for (let i = 0; i < this.modelData.ranges.length; i++) {
       const range = this.modelData.ranges[i]!;
-      const bindGroup = this.materialBindGroups[i]!;
+      if (range.renderClass === "blend") continue;
 
-      let pipeline = this.renderPipelines.opaqueCull;
-      if (range.transparent) {
-        pipeline = range.doubleSided
-          ? this.renderPipelines.transparentNoCull
-          : this.renderPipelines.transparentCull;
-      } else {
-        pipeline = range.doubleSided
-          ? this.renderPipelines.opaqueNoCull
-          : this.renderPipelines.opaqueCull;
-      }
+      const bindGroup = this.materialBindGroups[i]!;
+      const pipeline = range.doubleSided
+        ? this.renderPipelines.opaqueNoCull
+        : this.renderPipelines.opaqueCull;
 
       renderPass.setPipeline(pipeline);
       renderPass.setBindGroup(1, bindGroup);
@@ -576,14 +636,38 @@ export class WebGpuRenderer {
       );
     }
 
-    // 2. Draw inverted hull outline mesh (if enabled)
-    if (this.outlineEnabled) {
-      renderPass.setPipeline(this.renderPipelines.outline);
-      for (let i = 0; i < this.modelData.ranges.length; i++) {
-        const range = this.modelData.ranges[i]!;
-        if (!range.castOutline) continue;
+    // 3. Draw Blended materials
+    for (let i = 0; i < this.modelData.ranges.length; i++) {
+      const range = this.modelData.ranges[i]!;
+      if (range.renderClass !== "blend") continue;
 
-        const bindGroup = this.materialBindGroups[i]!;
+      const bindGroup = this.materialBindGroups[i]!;
+
+      if (range.doubleSided) {
+        // Draw back faces first (using front-cull)
+        renderPass.setPipeline(this.renderPipelines.transparentCullFront);
+        renderPass.setBindGroup(1, bindGroup);
+        renderPass.drawIndexed(
+          range.indexCount,
+          1,
+          range.firstIndex,
+          0,
+          range.materialIndex,
+        );
+
+        // Draw front faces second (using back-cull)
+        renderPass.setPipeline(this.renderPipelines.transparentCullBack);
+        renderPass.setBindGroup(1, bindGroup);
+        renderPass.drawIndexed(
+          range.indexCount,
+          1,
+          range.firstIndex,
+          0,
+          range.materialIndex,
+        );
+      } else {
+        // Draw front faces only (using back-cull)
+        renderPass.setPipeline(this.renderPipelines.transparentCullBack);
         renderPass.setBindGroup(1, bindGroup);
         renderPass.drawIndexed(
           range.indexCount,
@@ -646,7 +730,8 @@ export class WebGpuRenderer {
     this.verticesInputBuffer?.destroy();
     this.renderVertexBuffer?.destroy();
     this.indexBuffer?.destroy();
-    this.materialsBuffer?.destroy();
+    this.staticMaterialsBuffer?.destroy();
+    this.dynamicMaterialsBuffer?.destroy();
     this.boneMatricesBuffer?.destroy();
     this.vertexMorphAdjacencyBuffer?.destroy();
     this.vertexMorphContributionsBuffer?.destroy();

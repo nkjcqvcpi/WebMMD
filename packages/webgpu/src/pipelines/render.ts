@@ -5,8 +5,8 @@ import shaderCode from "../shaders/main.wgsl?raw";
 export interface RenderPipelines {
   opaqueCull: GPURenderPipeline;
   opaqueNoCull: GPURenderPipeline;
-  transparentCull: GPURenderPipeline;
-  transparentNoCull: GPURenderPipeline;
+  transparentCullBack: GPURenderPipeline;
+  transparentCullFront: GPURenderPipeline;
   outline: GPURenderPipeline;
   cameraBindGroupLayout: GPUBindGroupLayout;
   materialBindGroupLayout: GPUBindGroupLayout;
@@ -72,6 +72,11 @@ export function createRenderPipelines(
         visibility: GPUShaderStage.FRAGMENT,
         sampler: {},
       },
+      {
+        binding: 7,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      },
     ],
   });
 
@@ -80,9 +85,9 @@ export function createRenderPipelines(
     bindGroupLayouts: [cameraBindGroupLayout, materialBindGroupLayout],
   });
 
-  // Vertex buffer layout for the skinned output vertices (positions, normals, uvs)
+  // Vertex buffer layout for the skinned output vertices (positions, normals, uvs, edgeScale)
   const vertexBufferLayout: GPUVertexBufferLayout = {
-    arrayStride: 32, // pos(12) + normal(12) + uv(8) = 32 bytes
+    arrayStride: 36, // pos(12) + normal(12) + uv(8) + edge_scale(4) = 36 bytes
     attributes: [
       {
         shaderLocation: 0, // position
@@ -98,6 +103,11 @@ export function createRenderPipelines(
         shaderLocation: 2, // uv
         offset: 24,
         format: "float32x2",
+      },
+      {
+        shaderLocation: 3, // edge_scale
+        offset: 32,
+        format: "float32",
       },
     ],
   };
@@ -141,6 +151,7 @@ export function createRenderPipelines(
       },
       primitive: {
         topology: "triangle-list",
+        frontFace: "cw",
         cullMode,
       },
       depthStencil: {
@@ -161,14 +172,14 @@ export function createRenderPipelines(
     "none",
     false,
   );
-  const transparentCull = createPipeline(
-    "WebMMD Transparent Cull Pipeline",
+  const transparentCullBack = createPipeline(
+    "WebMMD Transparent Cull Back Pipeline",
     "back",
     true,
   );
-  const transparentNoCull = createPipeline(
-    "WebMMD Transparent No Cull Pipeline",
-    "none",
+  const transparentCullFront = createPipeline(
+    "WebMMD Transparent Cull Front Pipeline",
+    "front",
     true,
   );
 
@@ -204,6 +215,7 @@ export function createRenderPipelines(
     },
     primitive: {
       topology: "triangle-list",
+      frontFace: "cw",
       cullMode: "front", // Inverted hull requires front-face culling to show the inner outline mesh
     },
     depthStencil: {
@@ -216,8 +228,8 @@ export function createRenderPipelines(
   return {
     opaqueCull,
     opaqueNoCull,
-    transparentCull,
-    transparentNoCull,
+    transparentCullBack,
+    transparentCullFront,
     outline,
     cameraBindGroupLayout,
     materialBindGroupLayout,

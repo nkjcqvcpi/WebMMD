@@ -316,8 +316,8 @@ impl ModelRuntime {
     }
 
     pub fn get_material_states(&self) -> Vec<f32> {
-        let mut buffer = Vec::with_capacity(self.material_states.len() * 28);
-        for (i, m) in self.material_states.iter().enumerate() {
+        let mut buffer = Vec::with_capacity(self.material_states.len() * 32);
+        for m in &self.material_states {
             buffer.push(m.diffuse.x);
             buffer.push(m.diffuse.y);
             buffer.push(m.diffuse.z);
@@ -343,20 +343,20 @@ impl ModelRuntime {
             buffer.push(0.0);
             buffer.push(0.0);
 
-            let base = &self.base_materials[i];
+            buffer.push(m.texture_tint.x);
+            buffer.push(m.texture_tint.y);
+            buffer.push(m.texture_tint.z);
+            buffer.push(m.texture_tint.w);
 
-            let base_tex_idx = base.texture_index;
-            let sphere_tex_idx = base.sphere_texture_index;
-            let toon_tex_idx = base.toon_texture_index;
-            buffer.push(f32::from_bits(base_tex_idx as u32));
-            buffer.push(f32::from_bits(sphere_tex_idx as u32));
-            buffer.push(f32::from_bits(toon_tex_idx as u32));
-            buffer.push(0.0);
+            buffer.push(m.sphere_tint.x);
+            buffer.push(m.sphere_tint.y);
+            buffer.push(m.sphere_tint.z);
+            buffer.push(m.sphere_tint.w);
 
-            buffer.push(f32::from_bits(base.flags as u32));
-            buffer.push(f32::from_bits(base.sphere_mode as u32));
-            buffer.push(f32::from_bits(base.toon_mode as u32));
-            buffer.push(0.0);
+            buffer.push(m.toon_tint.x);
+            buffer.push(m.toon_tint.y);
+            buffer.push(m.toon_tint.z);
+            buffer.push(m.toon_tint.w);
         }
         buffer
     }

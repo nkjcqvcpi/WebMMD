@@ -189,44 +189,14 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         indices_bin.extend_from_slice(&(idx as u32).to_le_bytes());
     }
 
-    // 3. Pack Materials (112 bytes per material)
-    let mut materials_bin = Vec::with_capacity(model.materials.len() * 112);
+    // 3. Pack Materials (32 bytes per material)
+    let mut materials_bin = Vec::with_capacity(model.materials.len() * 32);
     for m in &model.materials {
-        // diffuse: vec4<f32> (16 bytes)
-        materials_bin.extend_from_slice(&m.diffuse.x.to_le_bytes());
-        materials_bin.extend_from_slice(&m.diffuse.y.to_le_bytes());
-        materials_bin.extend_from_slice(&m.diffuse.z.to_le_bytes());
-        materials_bin.extend_from_slice(&m.diffuse.w.to_le_bytes());
-
-        // ambient + shininess: vec4<f32> (16 bytes)
-        materials_bin.extend_from_slice(&m.ambient.x.to_le_bytes());
-        materials_bin.extend_from_slice(&m.ambient.y.to_le_bytes());
-        materials_bin.extend_from_slice(&m.ambient.z.to_le_bytes());
-        materials_bin.extend_from_slice(&m.shininess.to_le_bytes());
-
-        // specular: vec4<f32> (16 bytes)
-        materials_bin.extend_from_slice(&m.specular.x.to_le_bytes());
-        materials_bin.extend_from_slice(&m.specular.y.to_le_bytes());
-        materials_bin.extend_from_slice(&m.specular.z.to_le_bytes());
-        materials_bin.extend_from_slice(&0.0f32.to_le_bytes()); // padding
-
-        // edge_color: vec4<f32> (16 bytes)
-        materials_bin.extend_from_slice(&m.edge_color.x.to_le_bytes());
-        materials_bin.extend_from_slice(&m.edge_color.y.to_le_bytes());
-        materials_bin.extend_from_slice(&m.edge_color.z.to_le_bytes());
-        materials_bin.extend_from_slice(&m.edge_color.w.to_le_bytes());
-
-        // edge_parameters: vec4<f32> (16 bytes) -> edge_size + padding
-        materials_bin.extend_from_slice(&m.edge_size.to_le_bytes());
-        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
-        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
-        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
-
-        // texture_indices: vec4<i32> (16 bytes) -> texture_index, sphere_texture_index, toon_texture_index, padding
+        // texture_indices: vec4<i32> (16 bytes) -> texture_index, sphere_texture_index, toon_texture_index, render_classification padding
         materials_bin.extend_from_slice(&m.texture_index.to_le_bytes());
         materials_bin.extend_from_slice(&m.sphere_texture_index.to_le_bytes());
         materials_bin.extend_from_slice(&m.toon_texture_index.to_le_bytes());
-        materials_bin.extend_from_slice(&0i32.to_le_bytes());
+        materials_bin.extend_from_slice(&0i32.to_le_bytes()); // padding for render_classification
 
         // material_flags: vec4<u32> (16 bytes) -> flags, sphere_mode, toon_mode, padding
         materials_bin.extend_from_slice(&(m.flags as u32).to_le_bytes());
@@ -234,7 +204,7 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         materials_bin.extend_from_slice(&(m.toon_mode as u32).to_le_bytes());
         materials_bin.extend_from_slice(&0u32.to_le_bytes());
     }
-    assert_eq!(materials_bin.len(), model.materials.len() * 112);
+    assert_eq!(materials_bin.len(), model.materials.len() * 32);
 
     // 4. Pack Sparse Morphs
     let mut vertex_morph_offsets_bin = Vec::new();
@@ -276,36 +246,38 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
                 });
             }
             MorphOffsets::Uv(offsets) => {
-                let start = (uv_morph_offsets_bin.len() / 32) as u32; // struct size: 32 bytes
-                for off in offsets {
-                    // UvMorphOffset in WGSL:
-                    // struct UvMorphOffset {
-                    //     vertex_idx: u32,
-                    //     padding: u32,
-                    //     padding2: u32,
-                    //     padding3: u32,
-                    //     offset: vec4<f32>,
-                    // }
-                    // Size: 32 bytes (alignment 16)
-                    uv_morph_offsets_bin
-                        .extend_from_slice(&(off.vertex_index as u32).to_le_bytes());
-                    uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
-                    uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
-                    uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
+                if morph.morph_type == 3 {
+                    let start = (uv_morph_offsets_bin.len() / 32) as u32; // struct size: 32 bytes
+                    for off in offsets {
+                        // UvMorphOffset in WGSL:
+                        // struct UvMorphOffset {
+                        //     vertex_idx: u32,
+                        //     padding: u32,
+                        //     padding2: u32,
+                        //     padding3: u32,
+                        //     offset: vec4<f32>,
+                        // }
+                        // Size: 32 bytes (alignment 16)
+                        uv_morph_offsets_bin
+                            .extend_from_slice(&(off.vertex_index as u32).to_le_bytes());
+                        uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
+                        uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
+                        uv_morph_offsets_bin.extend_from_slice(&0u32.to_le_bytes()); // padding
 
-                    uv_morph_offsets_bin.extend_from_slice(&off.offset.x.to_le_bytes());
-                    uv_morph_offsets_bin.extend_from_slice(&off.offset.y.to_le_bytes());
-                    uv_morph_offsets_bin.extend_from_slice(&off.offset.z.to_le_bytes());
-                    uv_morph_offsets_bin.extend_from_slice(&off.offset.w.to_le_bytes());
+                        uv_morph_offsets_bin.extend_from_slice(&off.offset.x.to_le_bytes());
+                        uv_morph_offsets_bin.extend_from_slice(&off.offset.y.to_le_bytes());
+                        uv_morph_offsets_bin.extend_from_slice(&off.offset.z.to_le_bytes());
+                        uv_morph_offsets_bin.extend_from_slice(&off.offset.w.to_le_bytes());
+                    }
+                    let count = offsets.len() as u32;
+                    uv_morph_meta.push(PackedMorphMeta {
+                        morph_index: i,
+                        name_local: morph.name_local.clone(),
+                        name_universal: morph.name_universal.clone(),
+                        offset_start: start,
+                        offset_count: count,
+                    });
                 }
-                let count = offsets.len() as u32;
-                uv_morph_meta.push(PackedMorphMeta {
-                    morph_index: i,
-                    name_local: morph.name_local.clone(),
-                    name_universal: morph.name_universal.clone(),
-                    offset_start: start,
-                    offset_count: count,
-                });
             }
             _ => {}
         }

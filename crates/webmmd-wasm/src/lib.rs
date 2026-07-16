@@ -285,7 +285,7 @@ impl WasmModelRuntime {
         Ok(WasmModelRuntime {
             runtime,
             flat_skin_matrices: vec![0.0; num_bones * 16],
-            flat_material_states: vec![0.0; num_materials * 28],
+            flat_material_states: vec![0.0; num_materials * 32],
         })
     }
 
