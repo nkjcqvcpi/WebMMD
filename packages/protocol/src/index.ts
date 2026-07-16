@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 export interface WebMmdDiagnostic {
   severity: "error" | "warning";
@@ -59,6 +59,18 @@ export interface PackedMorphMeta {
   offsetCount: number;
 }
 
+export interface WasmModelBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+  center: [number, number, number];
+  boundingSphereRadius: number;
+  height: number;
+  recommendedCameraTarget: [number, number, number];
+  recommendedCameraDistance: number;
+  nearPlane: number;
+  farPlane: number;
+}
+
 export interface WasmModelMetadata {
   version: number;
   nameLocal: string;
@@ -75,6 +87,8 @@ export interface WasmModelMetadata {
   diagnostics: WebMmdDiagnostic[];
   vertexMorphMeta: PackedMorphMeta[];
   uvMorphMeta: PackedMorphMeta[];
+  additionalUvCount: number;
+  bounds: WasmModelBounds;
 }
 
 export type ParserRequest =
@@ -89,6 +103,26 @@ export type ParserResponse =
       materials: ArrayBuffer;
       vertexMorphOffsets: ArrayBuffer;
       uvMorphOffsets: ArrayBuffer;
+      additionalUvs: ArrayBuffer;
     }
   | { type: "LOAD_PMX_ERROR"; message: string }
   | { type: "CANCELLED" };
+
+export interface WebMmdTestState {
+  applicationReady: boolean;
+  webGpuReady: boolean;
+  wasmReady: boolean;
+  parserReady: boolean;
+  modelParsed: boolean;
+  modelValidated: boolean;
+  gpuUploadComplete: boolean;
+  firstFrameSubmitted: boolean;
+  firstFrameCompleted: boolean;
+  modelName: string | null;
+  vertexCount: number;
+  materialCount: number;
+  boneCount: number;
+  activeMorphCount: number;
+  uncapturedGpuErrors: string[];
+  applicationErrors: string[];
+}

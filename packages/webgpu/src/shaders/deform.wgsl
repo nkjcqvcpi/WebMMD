@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 struct SkinningInput {
   position: vec3<f32>,
@@ -55,7 +55,7 @@ struct MorphParams {
   weight: f32,
   offset_start: u32,
   offset_count: u32,
-  padding: u32,
+  channel: u32,
 };
 
 struct SkinningParams {
@@ -114,8 +114,10 @@ fn apply_uv_morph(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let v_idx = item.vertex_idx;
   let weight = morph_params.weight;
 
-  morphed_vertices[v_idx].u += item.offset.x * weight;
-  morphed_vertices[v_idx].v += item.offset.y * weight;
+  if (morph_params.channel == 0u) {
+    morphed_vertices[v_idx].u += item.offset.x * weight;
+    morphed_vertices[v_idx].v += item.offset.y * weight;
+  }
 }
 
 // Math Helpers for SDEF and QDEF

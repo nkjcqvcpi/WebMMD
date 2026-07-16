@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import computeCode from "../shaders/deform.wgsl?raw";
 
@@ -52,7 +52,7 @@ export function createComputePipelines(device: GPUDevice): ComputePipelines {
       {
         binding: 6, // morph_params: MorphParams
         visibility: GPUShaderStage.COMPUTE,
-        buffer: { type: "uniform" },
+        buffer: { type: "uniform", hasDynamicOffset: true },
       },
       {
         binding: 7, // skinning_params: SkinningParams

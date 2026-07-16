@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 struct CameraUniforms {
   view_projection: mat4x4<f32>,
@@ -9,11 +9,12 @@ struct CameraUniforms {
 
 struct Material {
   diffuse: vec4<f32>,
-  ambient: vec4<f32>, // ambient (12 bytes) + shininess (4 bytes)
+  ambient_shininess: vec4<f32>, // ambient (12 bytes) + shininess (4 bytes)
   specular: vec4<f32>, // specular (12 bytes) + padding (4 bytes)
   edge_color: vec4<f32>,
-  edge_size_flags: vec4<f32>, // edge_size, flags, sphere_mode, toon_mode
-  textures: vec4<i32>, // texture_idx, sphere_idx, toon_idx, padding
+  edge_parameters: vec4<f32>, // edge_size, padding
+  texture_indices: vec4<i32>, // base, sphere, toon, padding
+  material_flags: vec4<u32>, // flags, sphere_mode, toon_mode, padding
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -75,7 +76,7 @@ fn vs_outline(
   output.normal = normalize(input.normal);
 
   let material = materials[mat_idx];
-  let edge_size = material.edge_size_flags.x;
+  let edge_size = material.edge_parameters.x;
 
   // Extrude vertex along normal in object space
   let extruded_pos = input.position + output.normal * (edge_size * 0.01);
@@ -95,7 +96,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
   // Base texture
   var color = material.diffuse;
-  let has_base_tex = material.textures.x >= 0;
+  let has_base_tex = material.texture_indices.x >= 0;
   if (has_base_tex) {
     let tex_color = textureSample(base_texture, base_sampler, input.uv);
     color *= tex_color;
@@ -107,8 +108,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   // Toon lighting
-  let toon_mode = i32(material.edge_size_flags.w);
-  let has_toon = material.textures.z >= 0;
+  let toon_mode = i32(material.material_flags.z);
+  let has_toon = material.texture_indices.z >= 0;
   
   var lighting = vec3<f32>(1.0);
   
@@ -131,11 +132,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     lighting = vec3<f32>(ndotl * 0.6 + 0.4);
   }
 
-  var final_rgb = color.rgb * (0.4 * material.ambient.rgb + 0.8 * lighting);
+  var final_rgb = color.rgb * (0.4 * material.ambient_shininess.rgb + 0.8 * lighting);
 
   // Sphere map
-  let sphere_mode = i32(material.edge_size_flags.z);
-  let has_sphere = material.textures.y >= 0;
+  let sphere_mode = i32(material.material_flags.y);
+  let has_sphere = material.texture_indices.y >= 0;
   if (has_sphere && sphere_mode > 0) {
     // Generate view-space projected normal coordinates
     let sphere_uv = vec2<f32>(
@@ -160,7 +161,7 @@ fn fs_outline(input: VertexOutput) -> @location(0) vec4<f32> {
 
   // Alpha discard check if base texture is transparent
   var alpha = material.edge_color.a;
-  if (material.textures.x >= 0) {
+  if (material.texture_indices.x >= 0) {
     let tex_color = textureSample(base_texture, base_sampler, input.uv);
     if (tex_color.a < 0.1) {
       discard;

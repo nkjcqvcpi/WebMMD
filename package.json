@@ -1,7 +1,8 @@
 {
   "name": "webmmd-workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "WebMMD — PMX-only MikuMikuDance model viewer targeting Safari 26 & WebGPU",
   "scripts": {
     "prepare": "pnpm build:wasm",

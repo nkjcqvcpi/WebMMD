@@ -1,9 +1,9 @@
 [package]
 name = "webmmd-wasm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Google DeepMind Team"]
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 description = "WebAssembly bindings for WebMMD core parser and runtime"
 
 [lib]

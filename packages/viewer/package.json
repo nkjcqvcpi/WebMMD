@@ -1,7 +1,8 @@
 {
   "name": "@webmmd/viewer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "Viewer orchestrator and runtime controller for WebMMD",
   "type": "module",
   "main": "./src/index.ts",

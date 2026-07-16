@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 export async function createTextureFromImage(
   device: GPUDevice,
@@ -72,4 +72,50 @@ export function createFallbackSampler(device: GPUDevice): GPUSampler {
     addressModeU: "repeat",
     addressModeV: "repeat",
   });
+}
+
+export function createSharedToonTexture(
+  device: GPUDevice,
+  index: number,
+): GPUTexture {
+  const shadows: [number, number, number][] = [
+    [128, 128, 128], // toon01
+    [230, 204, 204], // toon02 (warm skin shadow)
+    [153, 153, 153], // toon03
+    [204, 204, 204], // toon04
+    [102, 102, 102], // toon05
+    [178, 178, 178], // toon06
+    [153, 128, 128], // toon07
+    [128, 128, 128], // toon08
+    [191, 191, 191], // toon09
+    [217, 217, 217], // toon10
+  ];
+  const shadow = shadows[index] || [128, 128, 128];
+
+  const texture = device.createTexture({
+    label: `Shared Toon Texture ${index + 1}`,
+    size: [1, 2, 1],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+
+  const data = new Uint8Array([
+    shadow[0]!,
+    shadow[1]!,
+    shadow[2]!,
+    255, // Pixel 0 (shadow)
+    255,
+    255,
+    255,
+    255, // Pixel 1 (highlight)
+  ]);
+
+  device.queue.writeTexture(
+    { texture },
+    data,
+    { bytesPerRow: 4, rowsPerImage: 2 },
+    [1, 2, 1],
+  );
+
+  return texture;
 }

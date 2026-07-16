@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { LitElement, html, css } from "lit";
 import { customElement, property, state } from "lit/decorators.js";

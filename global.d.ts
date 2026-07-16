@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 declare module "*.wgsl?raw" {
   const content: string;
@@ -8,4 +8,8 @@ declare module "*.wgsl?raw" {
 declare module "*.wgsl" {
   const content: string;
   export default content;
+}
+
+interface Window {
+  __webmmdTest?: import("@webmmd/protocol").WebMmdTestState;
 }

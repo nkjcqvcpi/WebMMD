@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import { execSync } from "child_process";
 import { existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";

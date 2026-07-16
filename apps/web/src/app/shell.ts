@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
@@ -15,6 +15,8 @@ export class WebMmdAppShell extends LitElement {
   @state() private sidebarOpen: boolean = true;
   @state() private zipPmxFiles: { key: string; name: string }[] = [];
   @state() private showPmxSelector: boolean = false;
+  @state() private showLicenseModal: boolean = false;
+  @state() private licenseAccepted: boolean = false;
 
   private worker: Worker | null = null;
   private viewer: WebMmdViewer | null = null;
@@ -280,6 +282,30 @@ export class WebMmdAppShell extends LitElement {
       z-index: 10;
     }
 
+    /* License Modal Overlay */
+    .license-modal-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(9, 9, 11, 0.95);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+
+    .license-modal-card {
+      background: rgba(15, 12, 50, 0.95);
+      border: 1px solid rgba(129, 140, 248, 0.3);
+      border-radius: 16px;
+      padding: 32px;
+      width: 90%;
+      max-width: 500px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+      text-align: center;
+    }
+
     /* PMX Selector Overlay */
     .pmx-selector-overlay {
       position: absolute;
@@ -349,6 +375,81 @@ export class WebMmdAppShell extends LitElement {
   }
 
   async firstUpdated() {
+    const accepted = localStorage.getItem("webmmd_license_accepted");
+    if (!accepted) {
+      this.showLicenseModal = true;
+    }
+
+    (window as any).__webmmdTest = {
+      ready: false,
+      loaded: false,
+      frameRenderedCount: 0,
+      setMorphWeight: (index: number, weight: number) => {
+        if (this.viewer) {
+          this.viewer.setMorphWeight(index, weight);
+        }
+      },
+      loadModelFromZipUrl: async (url: string, pmxPath: string) => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+          const blob = await res.blob();
+          const file = new File([blob], "model.zip", {
+            type: "application/zip",
+          });
+
+          const buffer = await file.arrayBuffer();
+          const unzipped = unzipSync(new Uint8Array(buffer));
+
+          const decodeFilename = (bytes: Uint8Array): string => {
+            try {
+              return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+            } catch {
+              return new TextDecoder("shift-jis").decode(bytes);
+            }
+          };
+
+          const fileMap = new Map<string, File>();
+          const pmxKeys: string[] = [];
+
+          for (const [garbledKey, data] of Object.entries(unzipped)) {
+            if (data.length === 0) continue;
+
+            const bytes = new Uint8Array(
+              garbledKey.split("").map((c) => c.charCodeAt(0)),
+            );
+            const decodedKey = decodeFilename(bytes);
+            const lowerKey = decodedKey.toLowerCase();
+
+            const parts = decodedKey.split("/");
+            const name = parts[parts.length - 1] || "file";
+
+            const f = new File([data], name);
+            fileMap.set(lowerKey, f);
+
+            if (lowerKey.endsWith(".pmx")) {
+              pmxKeys.push(decodedKey);
+            }
+          }
+
+          this.zipFileMap = fileMap;
+
+          const matchingKey = pmxKeys.find((k) =>
+            k.toLowerCase().includes(pmxPath.toLowerCase()),
+          );
+          if (!matchingKey) {
+            throw new Error(`PMX file "${pmxPath}" not found in zip archive.`);
+          }
+
+          this.selectZipPmx(matchingKey);
+          return true;
+        } catch (err: any) {
+          console.error("loadModelFromZipUrl failed:", err);
+          throw err;
+        }
+      },
+    };
+
     const canvas = this.shadowRoot?.querySelector(
       "#gpu-canvas",
     ) as HTMLCanvasElement;
@@ -358,6 +459,9 @@ export class WebMmdAppShell extends LitElement {
         await this.viewer.initialize((lostReason) => {
           this.parseError = `WebGPU Device Lost: ${lostReason}. Reloading page might be required.`;
         });
+        if ((window as any).__webmmdTest) {
+          (window as any).__webmmdTest.ready = true;
+        }
       } catch (err: any) {
         console.error("Failed to initialize WebGPU viewer:", err);
         this.parseError = err.message || "WebGPU initialization failed.";
@@ -680,7 +784,14 @@ export class WebMmdAppShell extends LitElement {
               msg.materials,
               msg.vertexMorphOffsets,
               msg.uvMorphOffsets,
+              msg.additionalUvs,
             )
+            .then(() => {
+              if ((window as any).__webmmdTest) {
+                (window as any).__webmmdTest.loaded = true;
+                (window as any).__webmmdTest.metadata = msg.metadata;
+              }
+            })
             .catch((err: any) => {
               console.error("Failed to load model into WebGPU:", err);
               this.parseError = `GPU Loading Failed: ${err.message || err}`;
@@ -735,10 +846,81 @@ export class WebMmdAppShell extends LitElement {
 
   render() {
     return html`
+      ${
+        this.showLicenseModal
+          ? html`
+              <div class="license-modal-overlay">
+                <div class="license-modal-card">
+                  <div style="font-size: 40px; margin-bottom: 12px;">⚖️</div>
+                  <h2
+                    style="font-size: 22px; font-weight: 700; color: #f8fafc; margin: 0 0 12px 0; font-family: 'Outfit';"
+                  >
+                    License & Notices
+                  </h2>
+                  <p
+                    style="font-size: 13px; color: #cbd5e1; margin: 0 0 20px 0; line-height: 1.6; text-align: left;"
+                  >
+                    This application is open source and licensed under the
+                    <strong>AGPL-3.0-or-later</strong>. Please read the project
+                    license and third-party notices by clicking the links below:
+                  </p>
+                  <div
+                    style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px; text-align: left;"
+                  >
+                    <a
+                      href="/NOTICE.md"
+                      target="_blank"
+                      class="license-link"
+                      style="color: #818cf8; text-decoration: underline; font-size: 14px; font-weight: 600;"
+                      >📄 Project License (NOTICE.md)</a
+                    >
+                    <a
+                      href="/THIRD_PARTY_NOTICES.md"
+                      target="_blank"
+                      class="license-link"
+                      style="color: #818cf8; text-decoration: underline; font-size: 14px; font-weight: 600;"
+                      >📄 Third-Party Notices (THIRD_PARTY_NOTICES.md)</a
+                    >
+                  </div>
+                  <div
+                    style="display: flex; align-items: center; gap: 8px; margin-bottom: 24px; text-align: left;"
+                  >
+                    <input
+                      type="checkbox"
+                      id="accept-license-checkbox"
+                      @change=${(e: Event) =>
+                        (this.licenseAccepted = (
+                          e.target as HTMLInputElement
+                        ).checked)}
+                    />
+                    <label
+                      for="accept-license-checkbox"
+                      style="font-size: 13px; color: #94a3b8; user-select: none; cursor: pointer;"
+                    >
+                      I accept the license terms and notices.
+                    </label>
+                  </div>
+                  <button
+                    ?disabled=${!this.licenseAccepted}
+                    @click=${() => {
+                      localStorage.setItem("webmmd_license_accepted", "true");
+                      this.showLicenseModal = false;
+                    }}
+                    style="background: #6366f1; color: white; font-weight: bold; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; width: 100%; font-size: 14px; opacity: ${
+                      this.licenseAccepted ? 1.0 : 0.5
+                    };"
+                  >
+                    Accept & Continue
+                  </button>
+                </div>
+              </div>
+            `
+          : ""
+      }
       <header>
         <div class="brand">
           <div class="logo">WebMMD</div>
-          <div class="version-tag">0.1.0</div>
+          <div class="version-tag">0.1.1</div>
         </div>
         <div class="controls">
           <input

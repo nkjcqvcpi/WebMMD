@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { createBuffer, createBufferWithData } from "../resources/buffer.js";
 import {
   createFallbackTexture,
   createFallbackSampler,
   createTextureFromImage,
+  createSharedToonTexture,
 } from "../resources/texture.js";
 import { createRenderPipelines, RenderPipelines } from "../pipelines/render.js";
 import {
@@ -22,6 +23,8 @@ export interface ModelRenderRange {
   textureIndex: number;
   sphereTextureIndex: number;
   toonTextureIndex: number;
+  transparent: boolean;
+  toonMode: number;
 }
 
 export interface ModelData {
@@ -64,6 +67,7 @@ export class WebGpuRenderer {
   // Active Model Textures
   private textures: GPUTexture[] = [];
   private samplers: GPUSampler[] = [];
+  private sharedToons: GPUTexture[] = [];
 
   // Bind Groups
   private cameraBindGroup: GPUBindGroup | null = null;
@@ -109,6 +113,11 @@ export class WebGpuRenderer {
     });
 
     this.recreateDepthBuffer();
+
+    this.sharedToons = [];
+    for (let i = 0; i < 10; i++) {
+      this.sharedToons.push(createSharedToonTexture(device, i));
+    }
   }
 
   recreateDepthBuffer() {
@@ -211,10 +220,11 @@ export class WebGpuRenderer {
     }
     device.queue.writeBuffer(this.boneMatricesBuffer, 0, identityMatrices);
 
+    const alignment = device.limits.minUniformBufferOffsetAlignment;
     this.morphParamsBuffer = createBuffer(
       device,
       "Morph Params Buffer",
-      16, // weight(4) + start(4) + count(4) + pad(4)
+      128 * alignment, // support up to 128 active morphs
       GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     );
 
@@ -262,7 +272,10 @@ export class WebGpuRenderer {
         { binding: 3, resource: { buffer: this.boneMatricesBuffer } },
         { binding: 4, resource: { buffer: this.vertexMorphOffsetsBuffer } },
         { binding: 5, resource: { buffer: this.uvMorphOffsetsBuffer } },
-        { binding: 6, resource: { buffer: this.morphParamsBuffer } },
+        {
+          binding: 6,
+          resource: { buffer: this.morphParamsBuffer, offset: 0, size: 16 },
+        },
         { binding: 7, resource: { buffer: this.skinningParamsBuffer } },
       ],
     });
@@ -273,7 +286,10 @@ export class WebGpuRenderer {
       const range = model.ranges[i]!;
       const baseTex = this.getTexture(range.textureIndex);
       const sphereTex = this.getTexture(range.sphereTextureIndex);
-      const toonTex = this.getTexture(range.toonTextureIndex);
+      const toonTex =
+        range.toonMode === 1
+          ? (this.sharedToons[range.toonTextureIndex] ?? this.defaultTexture!)
+          : this.getTexture(range.toonTextureIndex);
 
       const bindGroup = device.createBindGroup({
         label: `Material_${range.materialIndex}_BindGroup`,
@@ -324,6 +340,7 @@ export class WebGpuRenderer {
       start: number;
       count: number;
       weight: number;
+      channel: number;
     }[],
   ) {
     if (
@@ -341,39 +358,55 @@ export class WebGpuRenderer {
     const computePass = commandEncoder.beginComputePass({
       label: "Deform Compute Pass",
     });
-    computePass.setBindGroup(0, this.computeBindGroup);
 
-    // 1. Reset positions
+    // 1. Reset positions (with default dynamic offset of 0)
     computePass.setPipeline(this.computePipelines.reset);
+    computePass.setBindGroup(0, this.computeBindGroup, [0]);
     const workgroupCount = Math.ceil(this.modelData.vertexCount / 64);
     computePass.dispatchWorkgroups(workgroupCount);
 
-    // 2. Accumulate active morphs
-    for (const morph of activeMorphs) {
-      if (morph.weight <= 0.0 || morph.count === 0) continue;
+    // 2. Accumulate active morphs using dynamic uniform offsets
+    const alignment = device.limits.minUniformBufferOffsetAlignment;
+    const validMorphs = activeMorphs.filter(
+      (m) => m.weight > 0.0 && m.count > 0,
+    );
 
-      // Update morph params uniform
-      const params = new ArrayBuffer(16);
-      const f32View = new Float32Array(params);
-      const u32View = new Uint32Array(params);
-      f32View[0] = morph.weight;
-      u32View[1] = morph.start;
-      u32View[2] = morph.count;
+    if (validMorphs.length > 0) {
+      const totalSize = validMorphs.length * alignment;
+      const bufferData = new ArrayBuffer(totalSize);
+      const f32View = new Float32Array(bufferData);
+      const u32View = new Uint32Array(bufferData);
 
-      device.queue.writeBuffer(this.morphParamsBuffer!, 0, params);
-
-      // Dispatch
-      if (morph.type === "vertex") {
-        computePass.setPipeline(this.computePipelines.vertexMorph);
-      } else {
-        computePass.setPipeline(this.computePipelines.uvMorph);
+      for (let i = 0; i < validMorphs.length; i++) {
+        const morph = validMorphs[i]!;
+        const elementOffset = i * (alignment / 4);
+        f32View[elementOffset + 0] = morph.weight;
+        u32View[elementOffset + 1] = morph.start;
+        u32View[elementOffset + 2] = morph.count;
+        u32View[elementOffset + 3] = morph.channel;
       }
-      const morphWorkgroups = Math.ceil(morph.count / 64);
-      computePass.dispatchWorkgroups(morphWorkgroups);
+
+      device.queue.writeBuffer(this.morphParamsBuffer!, 0, bufferData);
+
+      for (let i = 0; i < validMorphs.length; i++) {
+        const morph = validMorphs[i]!;
+        const dynamicOffset = i * alignment;
+
+        computePass.setBindGroup(0, this.computeBindGroup, [dynamicOffset]);
+
+        if (morph.type === "vertex") {
+          computePass.setPipeline(this.computePipelines.vertexMorph);
+        } else {
+          computePass.setPipeline(this.computePipelines.uvMorph);
+        }
+        const morphWorkgroups = Math.ceil(morph.count / 64);
+        computePass.dispatchWorkgroups(morphWorkgroups);
+      }
     }
 
-    // 3. Run skinning
+    // 3. Run skinning (with default dynamic offset of 0)
     computePass.setPipeline(this.computePipelines.skin);
+    computePass.setBindGroup(0, this.computeBindGroup, [0]);
     computePass.dispatchWorkgroups(workgroupCount);
 
     computePass.end();
@@ -421,11 +454,22 @@ export class WebGpuRenderer {
     renderPass.setBindGroup(0, this.cameraBindGroup);
 
     // 1. Draw solid geometry
-    renderPass.setPipeline(this.renderPipelines.main);
     for (let i = 0; i < this.modelData.ranges.length; i++) {
       const range = this.modelData.ranges[i]!;
       const bindGroup = this.materialBindGroups[i]!;
 
+      let pipeline = this.renderPipelines.opaqueCull;
+      if (range.transparent) {
+        pipeline = range.doubleSided
+          ? this.renderPipelines.transparentNoCull
+          : this.renderPipelines.transparentCull;
+      } else {
+        pipeline = range.doubleSided
+          ? this.renderPipelines.opaqueNoCull
+          : this.renderPipelines.opaqueCull;
+      }
+
+      renderPass.setPipeline(pipeline);
       renderPass.setBindGroup(1, bindGroup);
       renderPass.drawIndexed(
         range.indexCount,
@@ -479,6 +523,14 @@ export class WebGpuRenderer {
     this.textures = [];
     this.samplers = [];
     this.materialBindGroups = [];
+
+    if (this.modelData) {
+      for (const bitmap of this.modelData.textureBitmaps) {
+        if (bitmap) {
+          bitmap.close();
+        }
+      }
+    }
     this.modelData = null;
   }
 
@@ -487,6 +539,10 @@ export class WebGpuRenderer {
     this.defaultTexture?.destroy();
     this.cameraUniformBuffer?.destroy();
     this.depthTexture?.destroy();
+    for (const tex of this.sharedToons) {
+      tex.destroy();
+    }
+    this.sharedToons = [];
     this.context = null;
   }
 }

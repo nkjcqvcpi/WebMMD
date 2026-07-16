@@ -1,6 +1,20 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 use crate::pmx::types::*;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmModelBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub center: [f32; 3],
+    pub bounding_sphere_radius: f32,
+    pub height: f32,
+    pub recommended_camera_target: [f32; 3],
+    pub recommended_camera_distance: f32,
+    pub near_plane: f32,
+    pub far_plane: f32,
+}
 
 pub struct PackedModel {
     pub vertices_bin: Vec<u8>,
@@ -8,8 +22,10 @@ pub struct PackedModel {
     pub materials_bin: Vec<u8>,
     pub vertex_morph_offsets_bin: Vec<u8>,
     pub uv_morph_offsets_bin: Vec<u8>,
+    pub additional_uvs_bin: Vec<u8>,
     pub vertex_morph_meta: Vec<PackedMorphMeta>,
     pub uv_morph_meta: Vec<PackedMorphMeta>,
+    pub bounds: WasmModelBounds,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -173,8 +189,8 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         indices_bin.extend_from_slice(&(idx as u32).to_le_bytes());
     }
 
-    // 3. Pack Materials (96 bytes per material)
-    let mut materials_bin = Vec::with_capacity(model.materials.len() * 96);
+    // 3. Pack Materials (112 bytes per material)
+    let mut materials_bin = Vec::with_capacity(model.materials.len() * 112);
     for m in &model.materials {
         // diffuse: vec4<f32> (16 bytes)
         materials_bin.extend_from_slice(&m.diffuse.x.to_le_bytes());
@@ -188,7 +204,7 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         materials_bin.extend_from_slice(&m.ambient.z.to_le_bytes());
         materials_bin.extend_from_slice(&m.shininess.to_le_bytes());
 
-        // specular: vec3<f32> (12 bytes) + 4 bytes padding
+        // specular: vec4<f32> (16 bytes)
         materials_bin.extend_from_slice(&m.specular.x.to_le_bytes());
         materials_bin.extend_from_slice(&m.specular.y.to_le_bytes());
         materials_bin.extend_from_slice(&m.specular.z.to_le_bytes());
@@ -200,18 +216,25 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         materials_bin.extend_from_slice(&m.edge_color.z.to_le_bytes());
         materials_bin.extend_from_slice(&m.edge_color.w.to_le_bytes());
 
-        // edge_size + flags + sphere_mode + toon_mode: vec4<f32> (16 bytes)
+        // edge_parameters: vec4<f32> (16 bytes) -> edge_size + padding
         materials_bin.extend_from_slice(&m.edge_size.to_le_bytes());
-        materials_bin.extend_from_slice(&(m.flags as f32).to_le_bytes());
-        materials_bin.extend_from_slice(&(m.sphere_mode as f32).to_le_bytes());
-        materials_bin.extend_from_slice(&(m.toon_mode as f32).to_le_bytes());
+        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
+        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
+        materials_bin.extend_from_slice(&0.0f32.to_le_bytes());
 
-        // texture indices: vec4<i32> (16 bytes)
+        // texture_indices: vec4<i32> (16 bytes) -> texture_index, sphere_texture_index, toon_texture_index, padding
         materials_bin.extend_from_slice(&m.texture_index.to_le_bytes());
         materials_bin.extend_from_slice(&m.sphere_texture_index.to_le_bytes());
         materials_bin.extend_from_slice(&m.toon_texture_index.to_le_bytes());
-        materials_bin.extend_from_slice(&0i32.to_le_bytes()); // padding
+        materials_bin.extend_from_slice(&0i32.to_le_bytes());
+
+        // material_flags: vec4<u32> (16 bytes) -> flags, sphere_mode, toon_mode, padding
+        materials_bin.extend_from_slice(&(m.flags as u32).to_le_bytes());
+        materials_bin.extend_from_slice(&(m.sphere_mode as u32).to_le_bytes());
+        materials_bin.extend_from_slice(&(m.toon_mode as u32).to_le_bytes());
+        materials_bin.extend_from_slice(&0u32.to_le_bytes());
     }
+    assert_eq!(materials_bin.len(), model.materials.len() * 112);
 
     // 4. Pack Sparse Morphs
     let mut vertex_morph_offsets_bin = Vec::new();
@@ -288,13 +311,100 @@ pub fn pack_model(model: &PmxModel) -> PackedModel {
         }
     }
 
+    let mut additional_uvs_bin = Vec::new();
+    for v in &model.vertices {
+        for uv in &v.additional_uvs {
+            additional_uvs_bin.extend_from_slice(&uv.x.to_le_bytes());
+            additional_uvs_bin.extend_from_slice(&uv.y.to_le_bytes());
+            additional_uvs_bin.extend_from_slice(&uv.z.to_le_bytes());
+            additional_uvs_bin.extend_from_slice(&uv.w.to_le_bytes());
+        }
+    }
+
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut min_z = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    let mut max_z = f32::MIN;
+
+    for v in &model.vertices {
+        if v.position.x < min_x {
+            min_x = v.position.x;
+        }
+        if v.position.y < min_y {
+            min_y = v.position.y;
+        }
+        if v.position.z < min_z {
+            min_z = v.position.z;
+        }
+        if v.position.x > max_x {
+            max_x = v.position.x;
+        }
+        if v.position.y > max_y {
+            max_y = v.position.y;
+        }
+        if v.position.z > max_z {
+            max_z = v.position.z;
+        }
+    }
+
+    if model.vertices.is_empty() {
+        min_x = 0.0;
+        min_y = 0.0;
+        min_z = 0.0;
+        max_x = 0.0;
+        max_y = 0.0;
+        max_z = 0.0;
+    }
+
+    let center = [
+        (min_x + max_x) * 0.5,
+        (min_y + max_y) * 0.5,
+        (min_z + max_z) * 0.5,
+    ];
+
+    let height = max_y - min_y;
+
+    let mut max_dist_sq = 0.0f32;
+    for v in &model.vertices {
+        let dx = v.position.x - center[0];
+        let dy = v.position.y - center[1];
+        let dz = v.position.z - center[2];
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        if dist_sq > max_dist_sq {
+            max_dist_sq = dist_sq;
+        }
+    }
+    let bounding_sphere_radius = max_dist_sq.sqrt();
+
+    let recommended_camera_target = [center[0], (min_y + max_y) * 0.5, center[2]];
+
+    let recommended_camera_distance = (bounding_sphere_radius * 2.2).clamp(10.0, 100.0);
+    let near_plane = (recommended_camera_distance * 0.05).max(0.1);
+    let far_plane = (recommended_camera_distance * 10.0).max(500.0);
+
+    let bounds = WasmModelBounds {
+        min: [min_x, min_y, min_z],
+        max: [max_x, max_y, max_z],
+        center,
+        bounding_sphere_radius,
+        height,
+        recommended_camera_target,
+        recommended_camera_distance,
+        near_plane,
+        far_plane,
+    };
+
     PackedModel {
         vertices_bin,
         indices_bin,
         materials_bin,
         vertex_morph_offsets_bin,
         uv_morph_offsets_bin,
+        additional_uvs_bin,
         vertex_morph_meta,
         uv_morph_meta,
+        bounds,
     }
 }

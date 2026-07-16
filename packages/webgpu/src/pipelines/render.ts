@@ -1,9 +1,12 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import shaderCode from "../shaders/main.wgsl?raw";
 
 export interface RenderPipelines {
-  main: GPURenderPipeline;
+  opaqueCull: GPURenderPipeline;
+  opaqueNoCull: GPURenderPipeline;
+  transparentCull: GPURenderPipeline;
+  transparentNoCull: GPURenderPipeline;
   outline: GPURenderPipeline;
   cameraBindGroupLayout: GPUBindGroupLayout;
   materialBindGroupLayout: GPUBindGroupLayout;
@@ -99,46 +102,75 @@ export function createRenderPipelines(
     ],
   };
 
-  // Main Render Pipeline
-  const main = device.createRenderPipeline({
-    label: "WebMMD Main Render Pipeline",
-    layout: pipelineLayout,
-    vertex: {
-      module: shaderModule,
-      entryPoint: "vs_main",
-      buffers: [vertexBufferLayout],
-    },
-    fragment: {
-      module: shaderModule,
-      entryPoint: "fs_main",
-      targets: [
-        {
-          format: canvasFormat,
-          blend: {
-            color: {
-              srcFactor: "src-alpha",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
+  // Helper function to create main render pipelines with varied primitive and fragment targets
+  const createPipeline = (
+    label: string,
+    cullMode: GPUCullMode,
+    isTransparent: boolean,
+  ): GPURenderPipeline => {
+    return device.createRenderPipeline({
+      label,
+      layout: pipelineLayout,
+      vertex: {
+        module: shaderModule,
+        entryPoint: "vs_main",
+        buffers: [vertexBufferLayout],
+      },
+      fragment: {
+        module: shaderModule,
+        entryPoint: "fs_main",
+        targets: [
+          {
+            format: canvasFormat,
+            blend: isTransparent
+              ? {
+                  color: {
+                    srcFactor: "src-alpha",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                  alpha: {
+                    srcFactor: "one",
+                    dstFactor: "one-minus-src-alpha",
+                    operation: "add",
+                  },
+                }
+              : undefined,
           },
-        },
-      ],
-    },
-    primitive: {
-      topology: "triangle-list",
-      cullMode: "none", // Double-sided control is dynamic via culling options in code, default none
-    },
-    depthStencil: {
-      format: "depth24plus",
-      depthWriteEnabled: true,
-      depthCompare: "less-equal",
-    },
-  });
+        ],
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode,
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: !isTransparent,
+        depthCompare: "less-equal",
+      },
+    });
+  };
+
+  const opaqueCull = createPipeline(
+    "WebMMD Opaque Cull Pipeline",
+    "back",
+    false,
+  );
+  const opaqueNoCull = createPipeline(
+    "WebMMD Opaque No Cull Pipeline",
+    "none",
+    false,
+  );
+  const transparentCull = createPipeline(
+    "WebMMD Transparent Cull Pipeline",
+    "back",
+    true,
+  );
+  const transparentNoCull = createPipeline(
+    "WebMMD Transparent No Cull Pipeline",
+    "none",
+    true,
+  );
 
   // Outline Render Pipeline
   const outline = device.createRenderPipeline({
@@ -181,5 +213,13 @@ export function createRenderPipelines(
     },
   });
 
-  return { main, outline, cameraBindGroupLayout, materialBindGroupLayout };
+  return {
+    opaqueCull,
+    opaqueNoCull,
+    transparentCull,
+    transparentNoCull,
+    outline,
+    cameraBindGroupLayout,
+    materialBindGroupLayout,
+  };
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 use wasm_bindgen::prelude::*;
 use webmmd_core::packing::pack_model;
@@ -12,6 +12,7 @@ pub struct WasmPackedModel {
     materials: Vec<u8>,
     vertex_morph_offsets: Vec<u8>,
     uv_morph_offsets: Vec<u8>,
+    additional_uvs: Vec<u8>,
     metadata_json: String,
 }
 
@@ -43,6 +44,11 @@ impl WasmPackedModel {
     }
 
     #[wasm_bindgen(getter)]
+    pub fn additional_uvs(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(&self.additional_uvs[..])
+    }
+
+    #[wasm_bindgen(getter)]
     pub fn metadata_json(&self) -> String {
         self.metadata_json.clone()
     }
@@ -66,6 +72,8 @@ struct WasmModelMetadata {
     diagnostics: Vec<webmmd_core::validation::Diagnostic>,
     vertex_morph_meta: Vec<webmmd_core::packing::PackedMorphMeta>,
     uv_morph_meta: Vec<webmmd_core::packing::PackedMorphMeta>,
+    additional_uv_count: usize,
+    bounds: webmmd_core::packing::WasmModelBounds,
 }
 
 #[derive(serde::Serialize)]
@@ -129,10 +137,13 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
 
     // Validate model
     let diagnostics = validate_pmx(&model);
-
-    // If there are critical errors in diagnostics, we can still pack or block
-    // PMX parse spec says "Reject or report... Do not panic on malformed user input. Expose stable structured errors."
-    // We will report all diagnostics back to UI.
+    if diagnostics.iter().any(|d| d.severity == "error") {
+        let first_error = diagnostics.iter().find(|d| d.severity == "error").unwrap();
+        return Err(JsValue::from_str(&format!(
+            "Fatal validation error ({} in {}): {}",
+            first_error.code, first_error.section, first_error.message
+        )));
+    }
 
     let packed = pack_model(&model);
 
@@ -203,6 +214,12 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
         })
         .collect();
 
+    let additional_uv_count = model
+        .vertices
+        .first()
+        .map(|v| v.additional_uvs.len())
+        .unwrap_or(0);
+
     let meta = WasmModelMetadata {
         version: model.version,
         name_local: model.name_local,
@@ -219,6 +236,8 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
         diagnostics,
         vertex_morph_meta: packed.vertex_morph_meta,
         uv_morph_meta: packed.uv_morph_meta,
+        additional_uv_count,
+        bounds: packed.bounds,
     };
 
     let metadata_json = serde_json::to_string(&meta)
@@ -230,6 +249,7 @@ pub fn parse_and_pack_pmx(data: &[u8]) -> Result<WasmPackedModel, JsValue> {
         materials: packed.materials_bin,
         vertex_morph_offsets: packed.vertex_morph_offsets_bin,
         uv_morph_offsets: packed.uv_morph_offsets_bin,
+        additional_uvs: packed.additional_uvs_bin,
         metadata_json,
     })
 }

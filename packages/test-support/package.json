@@ -1,7 +1,8 @@
 {
   "name": "@webmmd/test-support",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "description": "Synthetic PMX fixture generators and test support for WebMMD",
   "type": "module",
   "main": "./src/index.ts",

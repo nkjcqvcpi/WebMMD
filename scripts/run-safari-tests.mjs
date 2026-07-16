@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { exec, execSync } from "child_process";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
@@ -87,6 +87,18 @@ async function runTest() {
     const versionText = await versionEl.getText();
     console.log(`- Version: "${versionText}"`);
 
+    // Accept license modal terms
+    console.log("Accepting license modal terms...");
+    const checkbox = await shadowRoot.findElement(
+      By.css("#accept-license-checkbox"),
+    );
+    await checkbox.click();
+    const acceptButton = await shadowRoot.findElement(
+      By.css(".license-modal-card button"),
+    );
+    await acceptButton.click();
+    console.log("License accepted.");
+
     // Capture initial load screenshot
     let screenshotData = await driver.takeScreenshot();
     writeFileSync(
@@ -158,17 +170,22 @@ async function runTest() {
     await targetButton.click();
 
     console.log("Waiting for model parsing and GPU uploading...");
-    // We expect the canvas to obtain the "active" class once loaded
-    const canvas = await shadowRoot.findElement(By.css("#gpu-canvas"));
     await driver.wait(async () => {
-      const cls = await canvas.getAttribute("class");
-      return cls && cls.includes("active");
-    }, 15000);
-    console.log("GPU Canvas is active and rendering model!");
+      return await driver.executeScript(
+        "return window.__webmmdTest && window.__webmmdTest.loaded;",
+      );
+    }, 20000);
+    console.log("Model successfully loaded!");
 
-    // Allow textures to load, decode, and render completely
-    console.log("Waiting 5s for texture loading and rendering to stabilize...");
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Wait for rendering stability via frame rendered count
+    console.log("Waiting for frame rendering to stabilize...");
+    await driver.wait(async () => {
+      const count = await driver.executeScript(
+        "return window.__webmmdTest.frameRenderedCount;",
+      );
+      return count >= 1;
+    }, 10000);
+    console.log("Rendering stabilized!");
 
     // 4. Inspect metadata loading in Sidebar
     console.log("Inspecting inspector panel for model info...");
@@ -192,6 +209,56 @@ async function runTest() {
       "base64",
     );
     console.log("Saved model rendered screenshot.");
+
+    // 5. Activate two morphs simultaneously
+    console.log("Activating two usable Lynette morphs simultaneously...");
+    const morphsToActivate = await driver.executeScript(`
+      const meta = window.__webmmdTest.metadata;
+      const active = [];
+      for (let i = 0; i < meta.morphs.length; i++) {
+        const m = meta.morphs[i];
+        if (m.morphType === 1 || (m.morphType >= 3 && m.morphType <= 7)) {
+          active.push({ index: i, name: m.nameLocal, type: m.morphType });
+          if (active.length === 2) break;
+        }
+      }
+      return active;
+    `);
+
+    if (morphsToActivate.length < 2) {
+      throw new Error(
+        "Could not find at least two usable morphs in model metadata.",
+      );
+    }
+
+    for (const morph of morphsToActivate) {
+      console.log(
+        `- Activating morph "${morph.name}" (index: ${morph.index}, type: ${morph.type}) to weight 0.8`,
+      );
+      await driver.executeScript(
+        `window.__webmmdTest.setMorphWeight(${morph.index}, 0.8);`,
+      );
+    }
+
+    // Wait for rendering of the morphed state to capture
+    const baseCount = await driver.executeScript(
+      "return window.__webmmdTest.frameRenderedCount;",
+    );
+    await driver.wait(async () => {
+      const count = await driver.executeScript(
+        "return window.__webmmdTest.frameRenderedCount;",
+      );
+      return count >= baseCount + 1;
+    }, 10000);
+
+    // Capture morphed screenshot
+    screenshotData = await driver.takeScreenshot();
+    writeFileSync(
+      join(testResultsDir, "safari-4-morphs-active.png"),
+      screenshotData,
+      "base64",
+    );
+    console.log("Saved morphed rendered screenshot.");
 
     console.log("\n✅ Safari Web Automation verification PASSED!");
   } catch (error) {

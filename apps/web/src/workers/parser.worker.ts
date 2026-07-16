@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import init, { parse_and_pack_pmx } from "../wasm/webmmd_wasm.js";
 import type { ParserRequest, WasmModelMetadata } from "@webmmd/protocol";
@@ -30,6 +30,7 @@ self.onmessage = async (e: MessageEvent<ParserRequest>) => {
       const materials = packedModel.materials;
       const vertexMorphOffsets = packedModel.vertex_morph_offsets;
       const uvMorphOffsets = packedModel.uv_morph_offsets;
+      const additionalUvs = packedModel.additional_uvs;
       const metadataJson = packedModel.metadata_json;
 
       packedModel.free();
@@ -42,6 +43,7 @@ self.onmessage = async (e: MessageEvent<ParserRequest>) => {
       const materialsBuffer = materials.buffer;
       const vmOffsetsBuffer = vertexMorphOffsets.buffer;
       const uvOffsetsBuffer = uvMorphOffsets.buffer;
+      const addUvBuffer = additionalUvs.buffer;
 
       self.postMessage(
         {
@@ -52,6 +54,7 @@ self.onmessage = async (e: MessageEvent<ParserRequest>) => {
           materials: materialsBuffer,
           vertexMorphOffsets: vmOffsetsBuffer,
           uvMorphOffsets: uvOffsetsBuffer,
+          additionalUvs: addUvBuffer,
         },
         [
           verticesBuffer,
@@ -59,6 +62,7 @@ self.onmessage = async (e: MessageEvent<ParserRequest>) => {
           materialsBuffer,
           vmOffsetsBuffer,
           uvOffsetsBuffer,
+          addUvBuffer,
         ],
       );
     } catch (err: any) {

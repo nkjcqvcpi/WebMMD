@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { WebGpuRenderer, ModelData, ModelRenderRange } from "@webmmd/webgpu";
 import { OrbitCamera } from "./camera.js";
@@ -11,6 +11,7 @@ export class WebMmdViewer {
 
   private isRunning = false;
   private isDirty = true;
+  private frameRequested = false;
   private animationFrameId: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
 
@@ -44,12 +45,24 @@ export class WebMmdViewer {
   private setupResizeObserver() {
     this.resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const width = Math.floor(
+        let width = Math.floor(
           entry.contentRect.width * window.devicePixelRatio,
         );
-        const height = Math.floor(
+        let height = Math.floor(
           entry.contentRect.height * window.devicePixelRatio,
         );
+
+        const maxDimension = 2048;
+        if (width > maxDimension || height > maxDimension) {
+          const aspect = width / height;
+          if (width > height) {
+            width = maxDimension;
+            height = Math.round(maxDimension / aspect);
+          } else {
+            height = maxDimension;
+            width = Math.round(maxDimension * aspect);
+          }
+        }
 
         if (this.canvas.width !== width || this.canvas.height !== height) {
           this.canvas.width = width;
@@ -77,9 +90,20 @@ export class WebMmdViewer {
     materials: ArrayBuffer,
     vertexMorphOffsets: ArrayBuffer,
     uvMorphOffsets: ArrayBuffer,
+    _additionalUvs: ArrayBuffer,
   ) {
     this.activeMetadata = metadata;
     this.morphWeights.clear();
+    this.camera.frameModel(metadata.bounds);
+
+    if (metadata.additionalUvCount > 0) {
+      metadata.diagnostics.push({
+        severity: "warning",
+        code: "ADDITIONAL_UV_CHANNELS",
+        section: "Model",
+        message: `Model contains ${metadata.additionalUvCount} additional UV channel(s).`,
+      });
+    }
 
     // 1. Resolve and decode textures from VFS
     console.log("[Viewer] Resolving textures...");
@@ -92,38 +116,57 @@ export class WebMmdViewer {
       const indexCount = m.surfaceCount;
       offset += indexCount;
 
-      // Extract flags from materials array (or mock them for Stage 0.2 rendering)
-      // Standard PMX: texture_index, sphere_index, etc.
-      // We will parse flags dynamically. Let's make sure we find textures.
       return {
         materialIndex: matIdx,
         firstIndex,
         indexCount,
-        doubleSided: true, // Default to true or check flags
+        doubleSided: true,
         castOutline: true,
-        textureIndex: matIdx < metadata.materials.length ? matIdx : -1, // Simple link
+        textureIndex: matIdx < metadata.materials.length ? matIdx : -1,
         sphereTextureIndex: -1,
         toonTextureIndex: -1,
+        transparent: false,
+        toonMode: 0,
       };
     });
 
-    // Fix up actual texture links from compiled binary materials buffer
-    const matView = new Int32Array(materials);
+    // Assert material buffer size layout
+    const expectedMaterialSize = metadata.materials.length * 112;
+    if (materials.byteLength !== expectedMaterialSize) {
+      throw new Error(
+        `Material buffer byteLength mismatch. Expected ${expectedMaterialSize} bytes (112 bytes per material), got ${materials.byteLength} bytes.`,
+      );
+    }
+
+    const floatView = new Float32Array(materials);
+    const intView = new Int32Array(materials);
+    const uintView = new Uint32Array(materials);
+    const STRIDE = 28; // 28 * 4 = 112 bytes
+
     for (let i = 0; i < ranges.length; i++) {
       const range = ranges[i]!;
-      // Material stride is 96 bytes. Texture indices are stored at float offset index 20 (byte offset 80)
-      // 96 bytes = 24 float elements.
-      // Int32 texture indices are at elements: 20 (base), 21 (sphere), 22 (toon)
-      const baseIdx = matView[i * 24 + 20] ?? -1;
-      const sphereIdx = matView[i * 24 + 21] ?? -1;
-      const toonIdx = matView[i * 24 + 22] ?? -1;
-      const flags = matView[i * 24 + 17] ?? 0; // element 17 = flags
+      const offset = i * STRIDE;
+
+      const baseIdx = intView[offset + 20] ?? -1;
+      const sphereIdx = intView[offset + 21] ?? -1;
+      const toonIdx = intView[offset + 22] ?? -1;
+      const flags = uintView[offset + 24] ?? 0;
+      const diffuseAlpha = floatView[offset + 3] ?? 1.0;
+      const toonMode = uintView[offset + 26] ?? 0;
+
+      const texturePath = baseIdx >= 0 ? metadata.textures[baseIdx] : undefined;
+      const hasTextureAlpha = texturePath
+        ? texturePath.toLowerCase().endsWith(".png") ||
+          texturePath.toLowerCase().endsWith(".tga")
+        : false;
 
       range.textureIndex = baseIdx;
       range.sphereTextureIndex = sphereIdx;
       range.toonTextureIndex = toonIdx;
       range.doubleSided = (flags & 0x01) !== 0;
       range.castOutline = (flags & 0x10) !== 0;
+      range.transparent = diffuseAlpha < 0.99 || hasTextureAlpha;
+      range.toonMode = toonMode;
     }
 
     const modelData: ModelData = {
@@ -253,21 +296,31 @@ export class WebMmdViewer {
 
   public markDirty() {
     this.isDirty = true;
+    this.requestFrame();
   }
 
-  private startLoop() {
-    this.isRunning = true;
-    const tick = () => {
-      if (!this.isRunning) return;
+  private requestFrame() {
+    if (!this.isRunning || this.frameRequested) return;
+    this.frameRequested = true;
 
+    const renderCallback = () => {
+      this.frameRequested = false;
       if (this.isDirty && this.canvas.width > 0 && this.canvas.height > 0) {
         this.isDirty = false;
         this.renderFrame();
       }
-
-      this.animationFrameId = requestAnimationFrame(tick);
     };
-    this.animationFrameId = requestAnimationFrame(tick);
+
+    if ((window as any).__webmmdTest) {
+      this.animationFrameId = setTimeout(renderCallback, 16) as any;
+    } else {
+      this.animationFrameId = requestAnimationFrame(renderCallback);
+    }
+  }
+
+  private startLoop() {
+    this.isRunning = true;
+    this.markDirty();
   }
 
   private renderFrame() {
@@ -285,6 +338,7 @@ export class WebMmdViewer {
       start: number;
       count: number;
       weight: number;
+      channel: number;
     }[] = [];
 
     // Find active vertex & UV morphs
@@ -300,6 +354,7 @@ export class WebMmdViewer {
           start: vertexMeta.offsetStart,
           count: vertexMeta.offsetCount,
           weight,
+          channel: 0,
         });
       }
 
@@ -307,11 +362,18 @@ export class WebMmdViewer {
         (m) => m.morphIndex === idx,
       );
       if (uvMeta) {
+        const morphMeta = this.activeMetadata.morphs[idx];
+        const channel =
+          morphMeta && morphMeta.morphType >= 3 && morphMeta.morphType <= 7
+            ? morphMeta.morphType - 3
+            : 0;
+
         activeComputeMorphs.push({
           type: "uv",
           start: uvMeta.offsetStart,
           count: uvMeta.offsetCount,
           weight,
+          channel,
         });
       }
     }
@@ -321,12 +383,20 @@ export class WebMmdViewer {
 
     // 4. Render main pass
     this.renderer.draw();
+
+    if ((window as any).__webmmdTest) {
+      (window as any).__webmmdTest.frameRenderedCount++;
+    }
   }
 
   public dispose() {
     this.isRunning = false;
     if (this.animationFrameId !== null) {
-      cancelAnimationFrame(this.animationFrameId);
+      if ((window as any).__webmmdTest) {
+        clearTimeout(this.animationFrameId as any);
+      } else {
+        cancelAnimationFrame(this.animationFrameId);
+      }
     }
     this.resizeObserver?.disconnect();
     this.renderer.dispose();
