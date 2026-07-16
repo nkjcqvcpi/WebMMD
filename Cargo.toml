@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/webmmd-core",
+    "crates/webmmd-wasm",
+]
+resolver = "2"

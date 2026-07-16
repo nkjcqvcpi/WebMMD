@@ -1,0 +1,17 @@
+[package]
+name = "webmmd-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Google DeepMind Team"]
+license = "GPL-3.0-or-later"
+description = "Core PMX parser and MMD skeletal runtime in Rust"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+# We keep dependencies to a minimum. No external math crates are required
+# since we will implement a lightweight, verified 3D math package inside.
+# This ensures total determinism and avoids wasm-bindgen complexity.
+# We also use no_std-friendly parsing structures.
+
+[dev-dependencies]
+# For testing

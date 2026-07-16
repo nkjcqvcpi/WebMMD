@@ -1,0 +1,12 @@
+[submodule "ref/saba"]
+	path = ref/saba
+	url = https://github.com/benikabocha/saba.git
+	branch = main
+[submodule "ref/babylon-mmd"]
+	path = ref/babylon-mmd
+	url = https://github.com/noname0310/babylon-mmd.git
+	branch = main
+[submodule "ref/blender_mmd_tools"]
+	path = ref/blender_mmd_tools
+	url = https://github.com/MMD-Blender/blender_mmd_tools.git
+	branch = main

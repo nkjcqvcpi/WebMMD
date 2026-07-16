@@ -1,0 +1,22 @@
+{
+  "name": "web-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lit-based MMD model viewer application for WebMMD",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lit": "^3.2.1",
+    "@webmmd/protocol": "workspace:*",
+    "@webmmd/webgpu": "workspace:*",
+    "@webmmd/viewer": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^5.4.15",
+    "typescript": "^5.7.3"
+  }
+}
